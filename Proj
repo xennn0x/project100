@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
-//|                        Project100_Final_AutoReport_v1.07.mq5     |
-//|    Grid Abadi + Anti Spam + Laporan Rutin (Periodic Report)      |
+//|                      Project100_Final_v1.10.mq5                  |
+//|    Grid Step $2 + Periodic Info + Telegram Debugger              |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.07"
+#property version   "1.10"
 
 #include <Trade\PositionInfo.mqh>
 #include <Trade\Trade.mqh>
@@ -11,13 +11,14 @@
 // --- INPUT PARAMETERS ---
 input double ProfitTarget = 100.0;   // Target Profit ($)
 input double InitialLot   = 0.01;    // Lot awal
+input double GridStep     = 2.0;     // JARAK GRID ($2)
 input int    LevelsPerStep = 4;      // Step Martingale
 input int    MagicNumber  = 123456;  
-input bool   InpResetOnStart = false;// Reset posisi saat start?
-input int    DelaySeconds = 3;       // Jeda Anti-Spam (Detik)
+input bool   InpResetOnStart = false;
+input int    DelaySeconds = 3;       // Jeda Anti-Spam Eksekusi
 
-// --- SETTINGAN LAPORAN RUTIN ---
-input int    ReportIntervalMinutes = 5; // Kirim laporan status tiap X menit
+// --- LAPORAN INFO (TIMER) ---
+input int    ReportIntervalMinutes = 5; // Kirim Info Akun tiap X menit
 
 // --- TELEGRAM ---
 input string TelegramToken = "8571105656:AAH8DMkfIVljFYQgExha0SrCw2rVrvDeBYA";
@@ -27,7 +28,7 @@ input string TelegramChatID = "6575521535";
 double buyLotRefPrice = 0;  
 double sellLotRefPrice = 0;
 datetime lastExecutionTime = 0; 
-datetime lastReportTime = 0; // Timer untuk laporan rutin
+datetime lastReportTime = 0; 
 bool needReset = false;
 
 CPositionInfo positionInfo;
@@ -45,7 +46,12 @@ int OnInit() {
     sellLotRefPrice = price;
     
     needReset = InpResetOnStart;
-    lastReportTime = TimeCurrent(); // Mulai hitung waktu dari sekarang
+    lastReportTime = TimeCurrent(); 
+
+    // KIRIM PESAN TEST SAAT PASANG
+    // Agar ketahuan kalau error
+    Print("Mencoba kirim pesan tes Telegram...");
+    SendTelegram("🔌 *EA CONNECTED*\n📅 " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
     
     return(INIT_SUCCEEDED);
 }
@@ -57,50 +63,52 @@ void OnTick()
 {
    if(StringFind(_Symbol, "XAUUSD") < 0) return;
    
-   // 1. Cek Timer Laporan Rutin (Auto Report)
+   // 1. TIMER: Laporan Info Rutin (Info Lot, Equity, dll)
    if(TimeCurrent() - lastReportTime >= (ReportIntervalMinutes * 60)) {
       SendPeriodicReport();
       lastReportTime = TimeCurrent();
    }
 
-   // 2. Anti-Spam Eksekusi Order
-   if(TimeCurrent() < lastExecutionTime + DelaySeconds) return;
-
-   // 3. Logic Reset / Init
+   // 2. Logic Reset / Init (INSTANT)
    if(buyLotRefPrice == 0 || needReset) {
       InitBase();
       if(needReset) needReset = false;
       return;
    }
 
-   // 4. Tentukan Level (Absolut)
+   // 3. Tentukan Level Grid ($2 Step)
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   int currentAbsLevel = (int)MathRound(currentBid); 
+   int currentLevel = (int)(MathRound(currentBid / GridStep) * GridStep); 
 
-   if(currentAbsLevel <= 0) return;
+   if(currentLevel <= 0) return;
 
-   // 5. Cek Take Profit
-   CheckTakeProfit(currentAbsLevel);
+   // 4. Cek Take Profit (INSTANT)
+   CheckTakeProfit(currentLevel);
 
-   // 6. Manage Grid (Auto Refill)
-   ManageGrid(currentAbsLevel);
+   // 5. Manage Grid (Delay Anti-Spam)
+   if(TimeCurrent() >= lastExecutionTime + DelaySeconds) {
+      ManageGrid(currentLevel);
+   }
 }
 
 //+------------------------------------------------------------------+
-//| Fungsi Kirim Laporan Berkala (Sesuai Request)                    |
+//| Laporan Info Rutin (Pesan Terpisah)                              |
 //+------------------------------------------------------------------+
 void SendPeriodicReport() {
    double totalBuyLot = GetTotalLots(POSITION_TYPE_BUY);
    double totalSellLot = GetTotalLots(POSITION_TYPE_SELL);
+   double totalLot = totalBuyLot + totalSellLot;
    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    
-   string msg = "📊 *STATUS UPDATE* (" + (string)ReportIntervalMinutes + "m)\n"
+   string msg = "📊 *INFO UPDATE* (" + (string)ReportIntervalMinutes + "m)\n"
               + "------------------------\n"
-              + "⚖️ Lot Buy: " + DoubleToString(totalBuyLot, 2) + "\n"
-              + "⚖️ Lot Sell: " + DoubleToString(totalSellLot, 2) + "\n"
-              + "💵 Equity: $" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + "\n"
+              + "⚖️ Total Lot: " + DoubleToString(totalLot, 2) + "\n"
+              + "🟢 Lot Buy: " + DoubleToString(totalBuyLot, 2) + "\n"
+              + "🔴 Lot Sell: " + DoubleToString(totalSellLot, 2) + "\n"
               + "💲 Harga: " + DoubleToString(price, 2) + "\n"
-              + "⏳ Waktu: " + TimeToString(TimeCurrent(), TIME_MINUTES);
+              + "💵 Equity: $" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + "\n"
+              + "💰 Balance: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
+              + "📅 " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS);
               
    SendTelegram(msg);
 }
@@ -114,18 +122,20 @@ void InitBase() {
    buyLotRefPrice = price;
    sellLotRefPrice = price;
    
-   string msg = "🤖 *EA STARTED*\n"
+   string msg = "🤖 *EA ACTIVATED*\n"
               + "------------------------\n"
-              + "💵 Saldo: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
-              + "⏳ Waktu: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES);
+              + "📏 Grid Step: $" + DoubleToString(GridStep, 0) + "\n"
+              + "🏁 Start Price: " + DoubleToString(price, 2) + "\n"
+              + "💵 Balance: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
+              + "📅 " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS);
               
    SendTelegram(msg);
    lastExecutionTime = TimeCurrent();
-   lastReportTime = TimeCurrent(); // Reset timer laporan
+   lastReportTime = TimeCurrent(); 
 }
 
 //+------------------------------------------------------------------+
-//| Cek TP                                                           |
+//| Cek TP (Pesan TP)                                                |
 //+------------------------------------------------------------------+
 void CheckTakeProfit(int currentLevel) {
    // --- TIM BUY ---
@@ -134,12 +144,11 @@ void CheckTakeProfit(int currentLevel) {
       ClosePositions(POSITION_TYPE_BUY);
       buyLotRefPrice = (double)currentLevel; 
       
-      string msg = "💰 *TP BUY HIT* 💰\n"
+      string msg = "💰 *TP BUY HIT* (+$" + DoubleToString(bProfit, 2) + ")\n"
                  + "------------------------\n"
-                 + "🤑 Profit: $" + DoubleToString(bProfit, 2) + "\n"
-                 + "💼 Saldo: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
-                 + "⏳ Waktu: " + TimeToString(TimeCurrent(), TIME_MINUTES);
-                 
+                 + "🔄 Reset Cycle: " + (string)currentLevel + "\n"
+                 + "💵 New Balance: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
+                 + "📅 " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS);
       SendTelegram(msg);
       lastExecutionTime = TimeCurrent();
    }
@@ -150,12 +159,11 @@ void CheckTakeProfit(int currentLevel) {
       ClosePositions(POSITION_TYPE_SELL);
       sellLotRefPrice = (double)currentLevel;
       
-      string msg = "💎 *TP SELL HIT* 💎\n"
+      string msg = "💎 *TP SELL HIT* (+$" + DoubleToString(sProfit, 2) + ")\n"
                  + "------------------------\n"
-                 + "🤑 Profit: $" + DoubleToString(sProfit, 2) + "\n"
-                 + "💼 Saldo: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
-                 + "⏳ Waktu: " + TimeToString(TimeCurrent(), TIME_MINUTES);
-                 
+                 + "🔄 Reset Cycle: " + (string)currentLevel + "\n"
+                 + "💵 New Balance: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
+                 + "📅 " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS);
       SendTelegram(msg);
       lastExecutionTime = TimeCurrent();
    }
@@ -209,7 +217,7 @@ bool IsOrderExistsById(int level, ENUM_POSITION_TYPE type) {
       if(positionInfo.SelectByIndex(i)) {
          if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == MagicNumber && positionInfo.PositionType() == type) {
             if(StringFind(positionInfo.Comment(), searchComment) >= 0) return true;
-            if(MathAbs(positionInfo.PriceOpen() - (double)level) < 0.5) return true;
+            if(MathAbs(positionInfo.PriceOpen() - (double)level) < (GridStep/2.0)) return true;
          }
       }
    }
@@ -219,8 +227,9 @@ bool IsOrderExistsById(int level, ENUM_POSITION_TYPE type) {
 double CalculateLot(int level, bool isBuy) {
    double refPrice = isBuy ? buyLotRefPrice : sellLotRefPrice;
    int distance = (int)MathAbs((double)level - refPrice);
-   int stepIndex = distance / LevelsPerStep;
-   double lot = InitialLot * MathPow(2, stepIndex);
+   int stepsAway = (int)(distance / GridStep);
+   int martingaleLevel = stepsAway / LevelsPerStep;
+   double lot = InitialLot * MathPow(2, martingaleLevel);
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    lot = MathFloor(lot / step) * step;
    return MathMax(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), lot);
@@ -247,11 +256,35 @@ void CloseAllOrders() {
    ClosePositions(POSITION_TYPE_SELL);
 }
 
+//+------------------------------------------------------------------+
+//| KIRIM TELEGRAM (DEBUG MODE)                                      |
+//+------------------------------------------------------------------+
 void SendTelegram(string message) {
    string url = "https://api.telegram.org/bot"+TelegramToken+"/sendMessage";
    string params = "chat_id="+TelegramChatID+"&text="+message+"&parse_mode=Markdown"; 
+   
    char post_data[]; StringToCharArray(params, post_data);
    string headers = "Content-Type: application/x-www-form-urlencoded";
    uchar response[]; string result;
-   WebRequest("POST", url, headers, 3000, post_data, response, result);
+   
+   ResetLastError();
+   int timeout = 5000; 
+   int res = WebRequest("POST", url, headers, timeout, post_data, response, result);
+   
+   // --- DIAGNOSA ERROR JIKA GAGAL ---
+   if(res == -1) {
+      int err = GetLastError();
+      Print("❌ TELEGRAM GAGAL! Error Code: ", err);
+      
+      if(err == 4060) Print("👉 SOLUSI: Cek Tools > Options > Expert Advisors. Pastikan URL 'https://api.telegram.org' ada di daftar.");
+      if(err == 4014) Print("👉 SOLUSI: WebRequest DILARANG di Strategy Tester/Backtest. Pasang di Chart Live/Demo.");
+      if(err == 5200) Print("👉 SOLUSI: Koneksi internet putus atau URL Token salah.");
+   } 
+   else if(res != 200) {
+      Print("⚠️ TELEGRAM DITOLAK SERVER. HTTP Code: ", res);
+      Print("Respon Server: ", CharArrayToString(response));
+   }
+   else {
+      Print("✅ Telegram Berhasil Terkirim!");
+   }
 }
