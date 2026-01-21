@@ -1,0 +1,316 @@
+//+------------------------------------------------------------------+
+//|                           Project100.mq5                     b   |
+//|                    Grid EA with 3-Second Delay                   |
+//+------------------------------------------------------------------+
+#property strict
+#property version   "1.00"
+
+#include <Trade\PositionInfo.mqh>
+
+input double ProfitTarget = 100.0;
+input double InitialLot   = 0.01;
+input int    LevelsPerStep = 4;
+input int    MagicNumber  = 123456;
+input bool   ResetOnStart = false;
+
+// --- Telegram Notification ---
+input string TelegramToken = "8571105656:AAH8DMkfIVljFYQgExha0SrCw2rVrvDeBYA";
+input string TelegramChatID = "6575521535";
+
+double basePrice = 0;
+int buyBaseLevel = 0;
+int sellBaseLevel = 0;
+
+// --- DELAY 3 DETIK PER LEVEL ---
+datetime lastBuyOpen[1000];  // index 0–999
+datetime lastSellOpen[1000];
+
+CPositionInfo positionInfo;
+
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   string symbol = _Symbol;
+   if(StringFind(symbol, "XAUUSD") < 0)
+   {
+      Comment("Project100 hanya untuk XAUUSD, XAUUSDc, XAUUSDm");
+      return;
+   }
+
+   if(basePrice == 0)
+   {
+      basePrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      buyBaseLevel = 0;
+      sellBaseLevel = 0;
+      OpenGridPair(0);
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      SendTelegram("✓✓ [EA STARTED] "+symbol+
+                   "\nPrice: "+DoubleToString(basePrice,3)+
+                   "\nTime: "+TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS)+
+                   "\nBalance: $"+DoubleToString(balance,2));
+   }
+
+   if(ResetOnStart)
+   {
+      basePrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      buyBaseLevel = 0;
+      sellBaseLevel = 0;
+      CloseAllBuyOrders();
+      CloseAllSellOrders();
+      OpenGridPair(0);
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      SendTelegram("✓✓ [MANUAL RESET] "+symbol+
+                   "\nNew Price: "+DoubleToString(basePrice,3)+
+                   "\nTime: "+TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS)+
+                   "\nBalance: $"+DoubleToString(balance,2));
+   }
+
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int currentLevel = (int)MathFloor(currentBid - basePrice);
+
+   // Batasi level agar tidak out of range array
+   if(currentLevel < -500 || currentLevel > 499) return;
+
+   // --- Cek TP BUY ---
+   double buyProfit = CalculateTotalBuyProfit();
+   if(buyProfit >= ProfitTarget)
+   {
+      CloseAllBuyOrders();
+      buyBaseLevel = currentLevel;
+      if(!BuyOrderExistsAtLevel(currentLevel))
+         OpenBuyOrder(currentLevel, CalculateLot(currentLevel, buyBaseLevel));
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      SendTelegram("✓✓ [BUY TP] "+symbol+
+                   "\nProfit: $"+DoubleToString(buyProfit,2)+
+                   "\nTime: "+TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS)+
+                   "\nBalance: $"+DoubleToString(balance,2));
+   }
+
+   // --- Cek TP SELL ---
+   double sellProfit = CalculateTotalSellProfit();
+   if(sellProfit >= ProfitTarget)
+   {
+      CloseAllSellOrders();
+      sellBaseLevel = currentLevel;
+      if(!SellOrderExistsAtLevel(currentLevel))
+         OpenSellOrder(currentLevel, CalculateLot(currentLevel, sellBaseLevel));
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      SendTelegram("✓✓ [SELL TP] "+symbol+
+                   "\nProfit: $"+DoubleToString(sellProfit,2)+
+                   "\nTime: "+TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS)+
+                   "\nBalance: $"+DoubleToString(balance,2));
+   }
+
+   // --- Buka order di level saat ini jika belum ada ---
+   if(!BuyOrderExistsAtLevel(currentLevel))
+      OpenBuyOrder(currentLevel, CalculateLot(currentLevel, buyBaseLevel));
+   if(!SellOrderExistsAtLevel(currentLevel))
+      OpenSellOrder(currentLevel, CalculateLot(currentLevel, sellBaseLevel));
+}
+
+//+------------------------------------------------------------------+
+void OpenGridPair(int level)
+{
+   if(!BuyOrderExistsAtLevel(level))
+      OpenBuyOrder(level, CalculateLot(level, buyBaseLevel));
+   if(!SellOrderExistsAtLevel(level))
+      OpenSellOrder(level, CalculateLot(level, sellBaseLevel));
+}
+
+//+------------------------------------------------------------------+
+void OpenBuyOrder(int level, double lot_size)
+{
+   if(level < -500 || level > 499) return;
+   int idx = level + 500; // -500 → 0, 499 → 999
+
+   // --- DELAY 3 DETIK ---
+   if(TimeCurrent() - lastBuyOpen[idx] < 3) return;
+   lastBuyOpen[idx] = TimeCurrent();
+
+   if(BuyOrderExistsAtLevel(level)) return;
+
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request); ZeroMemory(result);
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lot_size;
+   request.type = ORDER_TYPE_BUY;
+   request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   request.deviation = 100;
+   request.magic = MagicNumber;
+   request.type_filling = ORDER_FILLING_FOK;
+   if(!OrderSend(request, result)) Print("OpenBuy error: ", result.retcode);
+}
+
+//+------------------------------------------------------------------+
+void OpenSellOrder(int level, double lot_size)
+{
+   if(level < -500 || level > 499) return;
+   int idx = level + 500;
+
+   // --- DELAY 3 DETIK ---
+   if(TimeCurrent() - lastSellOpen[idx] < 3) return;
+   lastSellOpen[idx] = TimeCurrent();
+
+   if(SellOrderExistsAtLevel(level)) return;
+
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request); ZeroMemory(result);
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lot_size;
+   request.type = ORDER_TYPE_SELL;
+   request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   request.deviation = 100;
+   request.magic = MagicNumber;
+   request.type_filling = ORDER_FILLING_FOK;
+   if(!OrderSend(request, result)) Print("OpenSell error: ", result.retcode);
+}
+
+//+------------------------------------------------------------------+
+double CalculateLot(int level, int baseLevel)
+{
+   int distance = MathAbs(level - baseLevel);
+   int stepIndex = distance / LevelsPerStep;
+   double lot = InitialLot * MathPow(2, stepIndex);
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   lot = MathMax(minLot, MathMin(maxLot, NormalizeDouble(lot, 2)));
+   lot = MathFloor(lot / step) * step;
+   return lot;
+}
+
+//+------------------------------------------------------------------+
+bool BuyOrderExistsAtLevel(int level)
+{
+   for(int i=0; i<PositionsTotal(); i++)
+   {
+      if(positionInfo.SelectByIndex(i) &&
+         positionInfo.Symbol() == _Symbol &&
+         positionInfo.Magic() == MagicNumber &&
+         positionInfo.PositionType() == POSITION_TYPE_BUY)
+      {
+         int posLevel = (int)MathFloor(positionInfo.PriceOpen() - basePrice);
+         if(posLevel == level) return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+bool SellOrderExistsAtLevel(int level)
+{
+   for(int i=0; i<PositionsTotal(); i++)
+   {
+      if(positionInfo.SelectByIndex(i) &&
+         positionInfo.Symbol() == _Symbol &&
+         positionInfo.Magic() == MagicNumber &&
+         positionInfo.PositionType() == POSITION_TYPE_SELL)
+      {
+         int posLevel = (int)MathFloor(positionInfo.PriceOpen() - basePrice);
+         if(posLevel == level) return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+double CalculateTotalBuyProfit()
+{
+   double profit = 0;
+   for(int i=0; i<PositionsTotal(); i++)
+   {
+      if(positionInfo.SelectByIndex(i) &&
+         positionInfo.Symbol() == _Symbol &&
+         positionInfo.Magic() == MagicNumber &&
+         positionInfo.PositionType() == POSITION_TYPE_BUY)
+      {
+         profit += positionInfo.Profit();
+      }
+   }
+   return profit;
+}
+
+//+------------------------------------------------------------------+
+double CalculateTotalSellProfit()
+{
+   double profit = 0;
+   for(int i=0; i<PositionsTotal(); i++)
+   {
+      if(positionInfo.SelectByIndex(i) &&
+         positionInfo.Symbol() == _Symbol &&
+         positionInfo.Magic() == MagicNumber &&
+         positionInfo.PositionType() == POSITION_TYPE_SELL)
+      {
+         profit += positionInfo.Profit();
+      }
+   }
+   return profit;
+}
+
+//+------------------------------------------------------------------+
+void CloseAllBuyOrders()
+{
+   for(int i=0; i<PositionsTotal(); i++)
+   {
+      if(positionInfo.SelectByIndex(i) &&
+         positionInfo.Symbol() == _Symbol &&
+         positionInfo.Magic() == MagicNumber &&
+         positionInfo.PositionType() == POSITION_TYPE_BUY)
+      {
+         MqlTradeRequest request; MqlTradeResult result;
+         ZeroMemory(request); ZeroMemory(result);
+         request.action = TRADE_ACTION_DEAL;
+         request.symbol = _Symbol;
+         request.volume = positionInfo.Volume();
+         request.type = ORDER_TYPE_SELL;
+         request.position = positionInfo.Ticket();
+         request.deviation = 100;
+         request.magic = MagicNumber;
+         request.type_filling = ORDER_FILLING_FOK;
+         if(!OrderSend(request, result)) Print("CloseBuy error: ", result.retcode);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+void CloseAllSellOrders()
+{
+   for(int i=0; i<PositionsTotal(); i++)
+   {
+      if(positionInfo.SelectByIndex(i) &&
+         positionInfo.Symbol() == _Symbol &&
+         positionInfo.Magic() == MagicNumber &&
+         positionInfo.PositionType() == POSITION_TYPE_SELL)
+      {
+         MqlTradeRequest request; MqlTradeResult result;
+         ZeroMemory(request); ZeroMemory(result);
+         request.action = TRADE_ACTION_DEAL;
+         request.symbol = _Symbol;
+         request.volume = positionInfo.Volume();
+         request.type = ORDER_TYPE_BUY;
+         request.position = positionInfo.Ticket();
+         request.deviation = 100;
+         request.magic = MagicNumber;
+         request.type_filling = ORDER_FILLING_FOK;
+         if(!OrderSend(request, result)) Print("CloseSell error: ", result.retcode);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+void SendTelegram(string message)
+{
+   string url = "https://api.telegram.org/bot"+TelegramToken+"/sendMessage";
+   string params = "chat_id="+TelegramChatID+"&text="+message;
+   char post_data[]; StringToCharArray(params, post_data);
+   int timeout = 3000;
+   string headers = "Content-Type: application/x-www-form-urlencoded";
+   uchar response[]; string result;
+   int res = WebRequest("POST", url, headers, timeout, post_data, response, result);
+   if(res != 200) Print("Telegram error: ", res);
+}
+//+------------------------------------------------------------------+
