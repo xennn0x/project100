@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
-//|                           Project100.mq5                     b   |
-//|                    Grid EA with 3-Second Delay                   |
+//|                                                Project100.mq5    |
+//|                        Grid EA with Configurable Delay                |
 //+------------------------------------------------------------------+
 #property strict
 #property version   "1.00"
@@ -12,6 +12,7 @@ input double InitialLot   = 0.01;
 input int    LevelsPerStep = 4;
 input int    MagicNumber  = 123456;
 input bool   ResetOnStart = false;
+input int    DelaySeconds = 3; // ← Atur delay di sini (detik)
 
 // --- Telegram Notification ---
 input string TelegramToken = "8571105656:AAH8DMkfIVljFYQgExha0SrCw2rVrvDeBYA";
@@ -21,8 +22,16 @@ double basePrice = 0;
 int buyBaseLevel = 0;
 int sellBaseLevel = 0;
 
-// --- DELAY 3 DETIK PER LEVEL ---
-datetime lastBuyOpen[1000];  // index 0–999
+// Catat level yang pernah diisi
+bool buyLevels[1000];
+bool sellLevels[1000];
+
+// Counter lot per sisi
+int buyStep = 0;
+int sellStep = 0;
+
+// Anti-spam: delay dinamis per level
+datetime lastBuyOpen[1000];
 datetime lastSellOpen[1000];
 
 CPositionInfo positionInfo;
@@ -57,6 +66,10 @@ void OnTick()
       sellBaseLevel = 0;
       CloseAllBuyOrders();
       CloseAllSellOrders();
+      buyStep = 0;
+      sellStep = 0;
+      ArrayInitialize(buyLevels, false);
+      ArrayInitialize(sellLevels, false);
       OpenGridPair(0);
       double balance = AccountInfoDouble(ACCOUNT_BALANCE);
       SendTelegram("✓✓ [MANUAL RESET] "+symbol+
@@ -68,8 +81,11 @@ void OnTick()
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    int currentLevel = (int)MathFloor(currentBid - basePrice);
 
-   // Batasi level agar tidak out of range array
-   if(currentLevel < -500 || currentLevel > 499) return;
+   if(currentLevel < -500 || currentLevel > 499)
+   {
+      Print("Level ", currentLevel, " diluar rentang aman (-500 s/d 499). Skip.");
+      return;
+   }
 
    // --- Cek TP BUY ---
    double buyProfit = CalculateTotalBuyProfit();
@@ -77,8 +93,23 @@ void OnTick()
    {
       CloseAllBuyOrders();
       buyBaseLevel = currentLevel;
+      buyStep = 0;
+      for(int i=0; i<PositionsTotal(); i++)
+      {
+         if(positionInfo.SelectByIndex(i) &&
+            positionInfo.Symbol() == _Symbol &&
+            positionInfo.Magic() == MagicNumber &&
+            positionInfo.PositionType() == POSITION_TYPE_SELL)
+         {
+            int posLevel = (int)MathFloor(positionInfo.PriceOpen() - basePrice);
+            if(posLevel == currentLevel)
+               buyLevels[posLevel + 500] = true;
+         }
+      }
       if(!BuyOrderExistsAtLevel(currentLevel))
-         OpenBuyOrder(currentLevel, CalculateLot(currentLevel, buyBaseLevel));
+         OpenBuyOrder(currentLevel, CalculateBuyLot(currentLevel));
+      if(!SellOrderExistsAtLevel(currentLevel))
+         OpenSellOrder(currentLevel, CalculateSellLot(currentLevel));
       double balance = AccountInfoDouble(ACCOUNT_BALANCE);
       SendTelegram("✓✓ [BUY TP] "+symbol+
                    "\nProfit: $"+DoubleToString(buyProfit,2)+
@@ -92,8 +123,23 @@ void OnTick()
    {
       CloseAllSellOrders();
       sellBaseLevel = currentLevel;
+      sellStep = 0;
+      for(int i=0; i<PositionsTotal(); i++)
+      {
+         if(positionInfo.SelectByIndex(i) &&
+            positionInfo.Symbol() == _Symbol &&
+            positionInfo.Magic() == MagicNumber &&
+            positionInfo.PositionType() == POSITION_TYPE_BUY)
+         {
+            int posLevel = (int)MathFloor(positionInfo.PriceOpen() - basePrice);
+            if(posLevel == currentLevel)
+               sellLevels[posLevel + 500] = true;
+         }
+      }
+      if(!BuyOrderExistsAtLevel(currentLevel))
+         OpenBuyOrder(currentLevel, CalculateBuyLot(currentLevel));
       if(!SellOrderExistsAtLevel(currentLevel))
-         OpenSellOrder(currentLevel, CalculateLot(currentLevel, sellBaseLevel));
+         OpenSellOrder(currentLevel, CalculateSellLot(currentLevel));
       double balance = AccountInfoDouble(ACCOUNT_BALANCE);
       SendTelegram("✓✓ [SELL TP] "+symbol+
                    "\nProfit: $"+DoubleToString(sellProfit,2)+
@@ -103,28 +149,28 @@ void OnTick()
 
    // --- Buka order di level saat ini jika belum ada ---
    if(!BuyOrderExistsAtLevel(currentLevel))
-      OpenBuyOrder(currentLevel, CalculateLot(currentLevel, buyBaseLevel));
+      OpenBuyOrder(currentLevel, CalculateBuyLot(currentLevel));
    if(!SellOrderExistsAtLevel(currentLevel))
-      OpenSellOrder(currentLevel, CalculateLot(currentLevel, sellBaseLevel));
+      OpenSellOrder(currentLevel, CalculateSellLot(currentLevel));
 }
 
 //+------------------------------------------------------------------+
 void OpenGridPair(int level)
 {
    if(!BuyOrderExistsAtLevel(level))
-      OpenBuyOrder(level, CalculateLot(level, buyBaseLevel));
+      OpenBuyOrder(level, CalculateBuyLot(level));
    if(!SellOrderExistsAtLevel(level))
-      OpenSellOrder(level, CalculateLot(level, sellBaseLevel));
+      OpenSellOrder(level, CalculateSellLot(level));
 }
 
 //+------------------------------------------------------------------+
 void OpenBuyOrder(int level, double lot_size)
 {
    if(level < -500 || level > 499) return;
-   int idx = level + 500; // -500 → 0, 499 → 999
+   int idx = level + 500;
 
-   // --- DELAY 3 DETIK ---
-   if(TimeCurrent() - lastBuyOpen[idx] < 3) return;
+   // --- DELAY DINAMIS ---
+   if(TimeCurrent() - lastBuyOpen[idx] < DelaySeconds) return;
    lastBuyOpen[idx] = TimeCurrent();
 
    if(BuyOrderExistsAtLevel(level)) return;
@@ -141,6 +187,7 @@ void OpenBuyOrder(int level, double lot_size)
    request.magic = MagicNumber;
    request.type_filling = ORDER_FILLING_FOK;
    if(!OrderSend(request, result)) Print("OpenBuy error: ", result.retcode);
+   buyLevels[idx] = true;
 }
 
 //+------------------------------------------------------------------+
@@ -149,8 +196,8 @@ void OpenSellOrder(int level, double lot_size)
    if(level < -500 || level > 499) return;
    int idx = level + 500;
 
-   // --- DELAY 3 DETIK ---
-   if(TimeCurrent() - lastSellOpen[idx] < 3) return;
+   // --- DELAY DINAMIS ---
+   if(TimeCurrent() - lastSellOpen[idx] < DelaySeconds) return;
    lastSellOpen[idx] = TimeCurrent();
 
    if(SellOrderExistsAtLevel(level)) return;
@@ -167,12 +214,27 @@ void OpenSellOrder(int level, double lot_size)
    request.magic = MagicNumber;
    request.type_filling = ORDER_FILLING_FOK;
    if(!OrderSend(request, result)) Print("OpenSell error: ", result.retcode);
+   sellLevels[idx] = true;
 }
 
 //+------------------------------------------------------------------+
-double CalculateLot(int level, int baseLevel)
+double CalculateBuyLot(int level)
 {
-   int distance = MathAbs(level - baseLevel);
+   int distance = MathAbs(level - buyBaseLevel);
+   int stepIndex = distance / LevelsPerStep;
+   double lot = InitialLot * MathPow(2, stepIndex);
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   lot = MathMax(minLot, MathMin(maxLot, NormalizeDouble(lot, 2)));
+   lot = MathFloor(lot / step) * step;
+   return lot;
+}
+
+//+------------------------------------------------------------------+
+double CalculateSellLot(int level)
+{
+   int distance = MathAbs(level - sellBaseLevel);
    int stepIndex = distance / LevelsPerStep;
    double lot = InitialLot * MathPow(2, stepIndex);
    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -304,6 +366,7 @@ void CloseAllSellOrders()
 //+------------------------------------------------------------------+
 void SendTelegram(string message)
 {
+   // Perbaiki: hapus spasi setelah "bot"
    string url = "https://api.telegram.org/bot"+TelegramToken+"/sendMessage";
    string params = "chat_id="+TelegramChatID+"&text="+message;
    char post_data[]; StringToCharArray(params, post_data);
