@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
-//|                                                Project100_Fix.mq5|
+//|                                              Project100_Fix2.mq5 |
 //|                                  Optimized Grid EA - No Spam     |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.01"
+#property version   "1.02"
 
 #include <Trade\PositionInfo.mqh>
 #include <Trade\Trade.mqh>
@@ -12,16 +12,18 @@ input double ProfitTarget = 100.0;
 input double InitialLot   = 0.01;
 input int    LevelsPerStep = 4;
 input int    MagicNumber  = 123456;
-input bool   ResetOnStart = false;
-input int    DelaySeconds = 5; // Jeda antar eksekusi
+input bool   InpResetOnStart = false; // Nama input diganti agar aman
+input int    DelaySeconds = 5; 
 
 // --- Telegram Notification ---
 input string TelegramToken = "8571105656:AAH8DMkfIVljFYQgExha0SrCw2rVrvDeBYA";
 input string TelegramChatID = "6575521535";
 
+// Variabel Global
 double basePrice = 0;
 int buyBaseLevel = 0;
 int sellBaseLevel = 0;
+bool needReset = false; // Variabel internal pengganti input
 
 // Anti-spam global timer
 datetime lastExecutionTime = 0;
@@ -32,8 +34,11 @@ CTrade trade;
 //+------------------------------------------------------------------+
 int OnInit() {
     trade.SetExpertMagicNumber(MagicNumber);
-    // Otomatis memilih filling mode yang tersedia di broker
     trade.SetTypeFillingBySymbol(_Symbol);
+    
+    // Salin status reset dari input ke variabel internal
+    needReset = InpResetOnStart;
+    
     return(INIT_SUCCEEDED);
 }
 
@@ -48,9 +53,10 @@ void OnTick()
    // Jeda eksekusi global untuk mencegah spam per tick
    if(TimeCurrent() < lastExecutionTime + DelaySeconds) return;
 
-   if(basePrice == 0 || ResetOnStart) {
+   // Logika Inisialisasi atau Reset
+   if(basePrice == 0 || needReset) {
       InitBase();
-      if(ResetOnStart) ResetOnStart = false; // Matikan flag setelah reset
+      if(needReset) needReset = false; // Matikan flag reset setelah dieksekusi
       return;
    }
 
@@ -151,7 +157,8 @@ double CalculateLot(int level, bool isBuy) {
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    lot = MathFloor(lot / step) * step;
    
-   return MathMax(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), lot);
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   return MathMax(minLot, lot);
 }
 
 //+------------------------------------------------------------------+
@@ -185,92 +192,5 @@ void SendTelegram(string message) {
    string headers = "Content-Type: application/x-www-form-urlencoded";
    uchar response[]; string result;
    WebRequest("POST", url, headers, 3000, post_data, response, result);
-}
-   {
-         profit += positionInfo.Profit();
-      }
-   }
-   return profit;
-}
-
-//+------------------------------------------------------------------+
-double CalculateTotalSellProfit()
-{
-   double profit = 0;
-   for(int i=0; i<PositionsTotal(); i++)
-   {
-      if(positionInfo.SelectByIndex(i) &&
-         positionInfo.Symbol() == _Symbol &&
-         positionInfo.Magic() == MagicNumber &&
-         positionInfo.PositionType() == POSITION_TYPE_SELL)
-      {
-         profit += positionInfo.Profit();
-      }
-   }
-   return profit;
-}
-
-//+------------------------------------------------------------------+
-void CloseAllBuyOrders()
-{
-   for(int i=0; i<PositionsTotal(); i++)
-   {
-      if(positionInfo.SelectByIndex(i) &&
-         positionInfo.Symbol() == _Symbol &&
-         positionInfo.Magic() == MagicNumber &&
-         positionInfo.PositionType() == POSITION_TYPE_BUY)
-      {
-         MqlTradeRequest request; MqlTradeResult result;
-         ZeroMemory(request); ZeroMemory(result);
-         request.action = TRADE_ACTION_DEAL;
-         request.symbol = _Symbol;
-         request.volume = positionInfo.Volume();
-         request.type = ORDER_TYPE_SELL;
-         request.position = positionInfo.Ticket();
-         request.deviation = 100;
-         request.magic = MagicNumber;
-         request.type_filling = ORDER_FILLING_FOK;
-         if(!OrderSend(request, result)) Print("CloseBuy error: ", result.retcode);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-void CloseAllSellOrders()
-{
-   for(int i=0; i<PositionsTotal(); i++)
-   {
-      if(positionInfo.SelectByIndex(i) &&
-         positionInfo.Symbol() == _Symbol &&
-         positionInfo.Magic() == MagicNumber &&
-         positionInfo.PositionType() == POSITION_TYPE_SELL)
-      {
-         MqlTradeRequest request; MqlTradeResult result;
-         ZeroMemory(request); ZeroMemory(result);
-         request.action = TRADE_ACTION_DEAL;
-         request.symbol = _Symbol;
-         request.volume = positionInfo.Volume();
-         request.type = ORDER_TYPE_BUY;
-         request.position = positionInfo.Ticket();
-         request.deviation = 100;
-         request.magic = MagicNumber;
-         request.type_filling = ORDER_FILLING_FOK;
-         if(!OrderSend(request, result)) Print("CloseSell error: ", result.retcode);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-void SendTelegram(string message)
-{
-   // Perbaiki: hapus spasi setelah "bot"
-   string url = "https://api.telegram.org/bot"+TelegramToken+"/sendMessage";
-   string params = "chat_id="+TelegramChatID+"&text="+message;
-   char post_data[]; StringToCharArray(params, post_data);
-   int timeout = 3000;
-   string headers = "Content-Type: application/x-www-form-urlencoded";
-   uchar response[]; string result;
-   int res = WebRequest("POST", url, headers, timeout, post_data, response, result);
-   if(res != 200) Print("Telegram error: ", res);
 }
 //+------------------------------------------------------------------+
