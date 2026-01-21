@@ -1,146 +1,149 @@
 //+------------------------------------------------------------------+
-//|                                              Project100_Fix2.mq5 |
-//|                                  Optimized Grid EA - No Spam     |
+//|                                     Project100_Final_v1.03.mq5   |
+//|               Grid EA: Hedging + Anti Spam + Virtual TP          |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.02"
+#property version   "1.03"
 
 #include <Trade\PositionInfo.mqh>
 #include <Trade\Trade.mqh>
 
-input double ProfitTarget = 100.0;
-input double InitialLot   = 0.01;
-input int    LevelsPerStep = 4;
-input int    MagicNumber  = 123456;
-input bool   InpResetOnStart = false; // Nama input diganti agar aman
-input int    DelaySeconds = 5; 
+// --- INPUT PARAMETERS ---
+input double ProfitTarget = 100.0;   // Target Profit dalam Uang ($)
+input double InitialLot   = 0.01;    // Lot awal
+input int    LevelsPerStep = 4;      // Kapan lot naik (martingale step)
+input int    MagicNumber  = 123456;  // ID Robot
+input bool   InpResetOnStart = false;// Set True jika ingin reset posisi saat EA dipasang
+input int    DelaySeconds = 3;       // Jeda detik antar order (Anti-Spam)
 
-// --- Telegram Notification ---
+// --- TELEGRAM SETTINGS ---
 input string TelegramToken = "8571105656:AAH8DMkfIVljFYQgExha0SrCw2rVrvDeBYA";
 input string TelegramChatID = "6575521535";
 
-// Variabel Global
+// --- GLOBAL VARIABLES ---
 double basePrice = 0;
 int buyBaseLevel = 0;
 int sellBaseLevel = 0;
-bool needReset = false; // Variabel internal pengganti input
-
-// Anti-spam global timer
-datetime lastExecutionTime = 0;
+bool needReset = false;       // Internal flag untuk reset
+datetime lastExecutionTime = 0; // Timer untuk anti-spam
 
 CPositionInfo positionInfo;
 CTrade trade;
 
 //+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
 int OnInit() {
     trade.SetExpertMagicNumber(MagicNumber);
-    trade.SetTypeFillingBySymbol(_Symbol);
+    trade.SetTypeFillingBySymbol(_Symbol); // Auto-detect filling mode
     
-    // Salin status reset dari input ke variabel internal
+    // Pindahkan input ke variabel internal agar bisa dimodifikasi logic
     needReset = InpResetOnStart;
     
     return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
 void OnTick()
 {
+   // 1. Validasi Pair
    if(StringFind(_Symbol, "XAUUSD") < 0) {
-      Comment("Hanya untuk XAUUSD");
+      Comment("EA ini dikhususkan untuk XAUUSD");
       return;
    }
 
-   // Jeda eksekusi global untuk mencegah spam per tick
+   // 2. Anti-Spam: Cek apakah masa tenggang sudah lewat?
    if(TimeCurrent() < lastExecutionTime + DelaySeconds) return;
 
-   // Logika Inisialisasi atau Reset
+   // 3. Logic Reset / Inisialisasi Awal
    if(basePrice == 0 || needReset) {
       InitBase();
-      if(needReset) needReset = false; // Matikan flag reset setelah dieksekusi
+      if(needReset) needReset = false; // Matikan trigger reset
       return;
    }
 
+   // 4. Hitung Level Grid Saat Ini
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   int currentLevel = (int)MathFloor(currentBid - basePrice);
+   // Menggunakan MathRound agar lebih presisi di angka bulat
+   int currentLevel = (int)MathRound(currentBid - basePrice); 
 
-   // Batasan level aman
+   // 5. Safety: Jangan trading jika harga lari terlalu jauh (Crash protection)
    if(currentLevel < -500 || currentLevel > 500) return;
 
-   // --- Logika Take Profit ---
+   // 6. Cek Take Profit (Virtual TP)
    CheckTakeProfit(currentLevel);
 
-   // --- Eksekusi Grid ---
+   // 7. Eksekusi Grid (Buy & Sell)
    ManageGrid(currentLevel);
 }
 
+//+------------------------------------------------------------------+
+//| Fungsi Reset & Start Awal                                        |
 //+------------------------------------------------------------------+
 void InitBase() {
    basePrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    buyBaseLevel = 0;
    sellBaseLevel = 0;
    
-   CloseAllOrders();
+   CloseAllOrders(); // Tutup semua posisi lama
    
-   // Buka order awal
+   // Buka posisi awal (Level 0)
+   // Buy dan Sell dibuka berurutan, tapi karena ada DelaySeconds di OnTick,
+   // Sell mungkin baru tereksekusi di tick berikutnya (sangat cepat).
    OpenOrder(ORDER_TYPE_BUY, 0, CalculateLot(0, true));
    OpenOrder(ORDER_TYPE_SELL, 0, CalculateLot(0, false));
    
-   SendTelegram("✓✓ [EA STARTED/RESET] "+_Symbol+"\nPrice: "+DoubleToString(basePrice,2));
+   SendTelegram("✓✓ [EA STARTED/RESET] "+_Symbol+"\nBase Price: "+DoubleToString(basePrice,2));
+   
+   // Update timer agar tidak double execution instan
    lastExecutionTime = TimeCurrent();
 }
 
 //+------------------------------------------------------------------+
-void ManageGrid(int currentLevel) {
-   bool buyExist = OrderExistsAtLevel(currentLevel, POSITION_TYPE_BUY);
-   bool sellExist = OrderExistsAtLevel(currentLevel, POSITION_TYPE_SELL);
+//| Manajemen Grid (Hedging Logic)                                   |
+//+------------------------------------------------------------------+
+void ManageGrid(int level) {
+   // Cek apakah Buy & Sell sudah ada menggunakan ID Pintar
+   bool buyExist = IsOrderExistsById(level, POSITION_TYPE_BUY);
+   bool sellExist = IsOrderExistsById(level, POSITION_TYPE_SELL);
 
+   // Jika Buy belum ada, Buka Buy
    if(!buyExist) {
-      if(OpenOrder(ORDER_TYPE_BUY, currentLevel, CalculateLot(currentLevel, true)))
-         lastExecutionTime = TimeCurrent();
+      if(OpenOrder(ORDER_TYPE_BUY, level, CalculateLot(level, true)))
+         lastExecutionTime = TimeCurrent(); // Reset timer jika sukses open
    }
    
+   // Jika Sell belum ada, Buka Sell
    if(!sellExist) {
-      if(OpenOrder(ORDER_TYPE_SELL, currentLevel, CalculateLot(currentLevel, false)))
-         lastExecutionTime = TimeCurrent();
+      // Cek timer lagi (opsional, untuk memastikan Sell tidak menabrak Buy di millisecond yang sama)
+      if(TimeCurrent() >= lastExecutionTime + DelaySeconds) {
+         if(OpenOrder(ORDER_TYPE_SELL, level, CalculateLot(level, false)))
+            lastExecutionTime = TimeCurrent();
+      }
    }
 }
 
 //+------------------------------------------------------------------+
-void CheckTakeProfit(int currentLevel) {
-   double bProfit = CalculateProfit(POSITION_TYPE_BUY);
-   if(bProfit >= ProfitTarget) {
-      ClosePositions(POSITION_TYPE_BUY);
-      buyBaseLevel = currentLevel;
-      SendTelegram("✓ [TP BUY] Profit: $"+DoubleToString(bProfit,2));
-      lastExecutionTime = TimeCurrent();
-   }
-
-   double sProfit = CalculateProfit(POSITION_TYPE_SELL);
-   if(sProfit >= ProfitTarget) {
-      ClosePositions(POSITION_TYPE_SELL);
-      sellBaseLevel = currentLevel;
-      SendTelegram("✓ [TP SELL] Profit: $"+DoubleToString(sProfit,2));
-      lastExecutionTime = TimeCurrent();
-   }
-}
-
+//| Cek Keberadaan Order (Anti-Double Entry)                         |
 //+------------------------------------------------------------------+
-bool OpenOrder(ENUM_ORDER_TYPE type, int level, double lot) {
-   double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+bool IsOrderExistsById(int level, ENUM_POSITION_TYPE type) {
+   string searchComment = "L:" + (string)level; // ID Unik, contoh: "L:5"
    
-   if(trade.PositionOpen(_Symbol, type, lot, price, 0, 0, "Level: "+(string)level)) {
-      if(trade.ResultRetcode() == TRADE_RETCODE_DONE) return true;
-   }
-   return false;
-}
-
-//+------------------------------------------------------------------+
-bool OrderExistsAtLevel(int level, ENUM_POSITION_TYPE type) {
    for(int i=PositionsTotal()-1; i>=0; i--) {
       if(positionInfo.SelectByIndex(i)) {
-         if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == MagicNumber && positionInfo.PositionType() == type) {
-            int posLevel = (int)MathFloor(positionInfo.PriceOpen() - basePrice);
-            if(posLevel == level) return true;
+         if(positionInfo.Symbol() == _Symbol && 
+            positionInfo.Magic() == MagicNumber && 
+            positionInfo.PositionType() == type) {
+            
+            // CARA 1: Cek ID di Komentar (Paling Akurat)
+            if(StringFind(positionInfo.Comment(), searchComment) >= 0) return true;
+            
+            // CARA 2 (Backup): Cek Jarak Harga
+            // Jika broker menghapus komentar, kita cek apakah ada order di sekitar harga target (+- 0.5 poin)
+            double targetPrice = basePrice + level;
+            if(MathAbs(positionInfo.PriceOpen() - targetPrice) < 0.5) return true;
          }
       }
    }
@@ -148,19 +151,64 @@ bool OrderExistsAtLevel(int level, ENUM_POSITION_TYPE type) {
 }
 
 //+------------------------------------------------------------------+
+//| Eksekusi Order                                                   |
+//+------------------------------------------------------------------+
+bool OpenOrder(ENUM_ORDER_TYPE type, int level, double lot) {
+   double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Masukkan ID Level ke dalam komentar order
+   string comment = "L:" + (string)level; 
+   
+   if(trade.PositionOpen(_Symbol, type, lot, price, 0, 0, comment)) {
+      if(trade.ResultRetcode() == TRADE_RETCODE_DONE) return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Cek & Eksekusi Take Profit (Virtual)                             |
+//+------------------------------------------------------------------+
+void CheckTakeProfit(int currentLevel) {
+   // --- TIM BUY ---
+   double bProfit = CalculateProfit(POSITION_TYPE_BUY);
+   if(bProfit >= ProfitTarget) {
+      ClosePositions(POSITION_TYPE_BUY);
+      buyBaseLevel = currentLevel; // Geser base perhitungan lot
+      SendTelegram("✓ [TP BUY] Profit: $"+DoubleToString(bProfit,2));
+      lastExecutionTime = TimeCurrent();
+   }
+
+   // --- TIM SELL ---
+   double sProfit = CalculateProfit(POSITION_TYPE_SELL);
+   if(sProfit >= ProfitTarget) {
+      ClosePositions(POSITION_TYPE_SELL);
+      sellBaseLevel = currentLevel; // Geser base perhitungan lot
+      SendTelegram("✓ [TP SELL] Profit: $"+DoubleToString(sProfit,2));
+      lastExecutionTime = TimeCurrent();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Hitung Lot Martingale                                            |
+//+------------------------------------------------------------------+
 double CalculateLot(int level, bool isBuy) {
    int base = isBuy ? buyBaseLevel : sellBaseLevel;
    int distance = MathAbs(level - base);
    int stepIndex = distance / LevelsPerStep;
    
    double lot = InitialLot * MathPow(2, stepIndex);
-   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   lot = MathFloor(lot / step) * step;
    
+   // Normalisasi Lot sesuai aturan broker
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   return MathMax(minLot, lot);
+   
+   lot = MathFloor(lot / step) * step;
+   return MathMax(minLot, MathMin(maxLot, lot));
 }
 
+//+------------------------------------------------------------------+
+//| Hitung Total Profit per Tim (Buy/Sell)                           |
 //+------------------------------------------------------------------+
 double CalculateProfit(ENUM_POSITION_TYPE type) {
    double p = 0;
@@ -171,6 +219,8 @@ double CalculateProfit(ENUM_POSITION_TYPE type) {
    return p;
 }
 
+//+------------------------------------------------------------------+
+//| Tutup Posisi Massal                                              |
 //+------------------------------------------------------------------+
 void ClosePositions(ENUM_POSITION_TYPE type) {
    for(int i=PositionsTotal()-1; i>=0; i--) {
@@ -184,6 +234,8 @@ void CloseAllOrders() {
    ClosePositions(POSITION_TYPE_SELL);
 }
 
+//+------------------------------------------------------------------+
+//| Kirim Telegram                                                   |
 //+------------------------------------------------------------------+
 void SendTelegram(string message) {
    string url = "https://api.telegram.org/bot"+TelegramToken+"/sendMessage";
