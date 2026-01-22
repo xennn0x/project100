@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
-//|                      Project100_Final_v1.10.mq5                  |
-//|    Grid Step $2 + Periodic Info + Telegram Debugger              |
+//|                      Project100_Final_v1.12.mq5                  |
+//|    Grid Step $2 + HTML Mode (Anti Error 400) + Token Baru        |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.10"
+#property version   "1.12"
 
 #include <Trade\PositionInfo.mqh>
 #include <Trade\Trade.mqh>
@@ -20,8 +20,8 @@ input int    DelaySeconds = 3;       // Jeda Anti-Spam Eksekusi
 // --- LAPORAN INFO (TIMER) ---
 input int    ReportIntervalMinutes = 5; // Kirim Info Akun tiap X menit
 
-// --- TELEGRAM ---
-input string TelegramToken = "8571105656:AAH8DMkfIVljFYQgExha0SrCw2rVrvDeBYA";
+// --- TELEGRAM (TOKEN BARU & HTML MODE) ---
+input string TelegramToken = "8571105656:AAHyTtdXkmQjkDZGZsJcO8_mc9clrafyc_8";
 input string TelegramChatID = "6575521535";
 
 // --- GLOBAL VARIABLES ---
@@ -48,10 +48,9 @@ int OnInit() {
     needReset = InpResetOnStart;
     lastReportTime = TimeCurrent(); 
 
-    // KIRIM PESAN TEST SAAT PASANG
-    // Agar ketahuan kalau error
+    // KIRIM PESAN TEST (HTML)
     Print("Mencoba kirim pesan tes Telegram...");
-    SendTelegram("🔌 *EA CONNECTED*\n📅 " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
+    SendTelegram("🔌 <b>EA CONNECTED (HTML Mode)</b>\n📅 " + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
     
     return(INIT_SUCCEEDED);
 }
@@ -63,7 +62,7 @@ void OnTick()
 {
    if(StringFind(_Symbol, "XAUUSD") < 0) return;
    
-   // 1. TIMER: Laporan Info Rutin (Info Lot, Equity, dll)
+   // 1. TIMER: Laporan Info Rutin
    if(TimeCurrent() - lastReportTime >= (ReportIntervalMinutes * 60)) {
       SendPeriodicReport();
       lastReportTime = TimeCurrent();
@@ -92,7 +91,7 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| Laporan Info Rutin (Pesan Terpisah)                              |
+//| Laporan Info Rutin (HTML)                                        |
 //+------------------------------------------------------------------+
 void SendPeriodicReport() {
    double totalBuyLot = GetTotalLots(POSITION_TYPE_BUY);
@@ -100,7 +99,7 @@ void SendPeriodicReport() {
    double totalLot = totalBuyLot + totalSellLot;
    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    
-   string msg = "📊 *INFO UPDATE* (" + (string)ReportIntervalMinutes + "m)\n"
+   string msg = "📊 <b>INFO UPDATE</b> (" + (string)ReportIntervalMinutes + "m)\n"
               + "------------------------\n"
               + "⚖️ Total Lot: " + DoubleToString(totalLot, 2) + "\n"
               + "🟢 Lot Buy: " + DoubleToString(totalBuyLot, 2) + "\n"
@@ -114,7 +113,7 @@ void SendPeriodicReport() {
 }
 
 //+------------------------------------------------------------------+
-//| Init Base (Pesan START)                                          |
+//| Init Base (Start - HTML)                                         |
 //+------------------------------------------------------------------+
 void InitBase() {
    CloseAllOrders();
@@ -122,7 +121,7 @@ void InitBase() {
    buyLotRefPrice = price;
    sellLotRefPrice = price;
    
-   string msg = "🤖 *EA ACTIVATED*\n"
+   string msg = "🤖 <b>EA ACTIVATED</b>\n"
               + "------------------------\n"
               + "📏 Grid Step: $" + DoubleToString(GridStep, 0) + "\n"
               + "🏁 Start Price: " + DoubleToString(price, 2) + "\n"
@@ -135,7 +134,7 @@ void InitBase() {
 }
 
 //+------------------------------------------------------------------+
-//| Cek TP (Pesan TP)                                                |
+//| Cek TP (TP - HTML)                                               |
 //+------------------------------------------------------------------+
 void CheckTakeProfit(int currentLevel) {
    // --- TIM BUY ---
@@ -144,7 +143,7 @@ void CheckTakeProfit(int currentLevel) {
       ClosePositions(POSITION_TYPE_BUY);
       buyLotRefPrice = (double)currentLevel; 
       
-      string msg = "💰 *TP BUY HIT* (+$" + DoubleToString(bProfit, 2) + ")\n"
+      string msg = "💰 <b>TP BUY HIT</b> (+$" + DoubleToString(bProfit, 2) + ")\n"
                  + "------------------------\n"
                  + "🔄 Reset Cycle: " + (string)currentLevel + "\n"
                  + "💵 New Balance: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
@@ -159,7 +158,7 @@ void CheckTakeProfit(int currentLevel) {
       ClosePositions(POSITION_TYPE_SELL);
       sellLotRefPrice = (double)currentLevel;
       
-      string msg = "💎 *TP SELL HIT* (+$" + DoubleToString(sProfit, 2) + ")\n"
+      string msg = "💎 <b>TP SELL HIT</b> (+$" + DoubleToString(sProfit, 2) + ")\n"
                  + "------------------------\n"
                  + "🔄 Reset Cycle: " + (string)currentLevel + "\n"
                  + "💵 New Balance: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
@@ -257,11 +256,12 @@ void CloseAllOrders() {
 }
 
 //+------------------------------------------------------------------+
-//| KIRIM TELEGRAM (DEBUG MODE)                                      |
+//| KIRIM TELEGRAM (HTML MODE - PASTI MASUK)                         |
 //+------------------------------------------------------------------+
 void SendTelegram(string message) {
    string url = "https://api.telegram.org/bot"+TelegramToken+"/sendMessage";
-   string params = "chat_id="+TelegramChatID+"&text="+message+"&parse_mode=Markdown"; 
+   // Ubah parse_mode ke HTML karena Markdown sering error 400
+   string params = "chat_id="+TelegramChatID+"&text="+message+"&parse_mode=HTML"; 
    
    char post_data[]; StringToCharArray(params, post_data);
    string headers = "Content-Type: application/x-www-form-urlencoded";
@@ -271,20 +271,17 @@ void SendTelegram(string message) {
    int timeout = 5000; 
    int res = WebRequest("POST", url, headers, timeout, post_data, response, result);
    
-   // --- DIAGNOSA ERROR JIKA GAGAL ---
    if(res == -1) {
       int err = GetLastError();
       Print("❌ TELEGRAM GAGAL! Error Code: ", err);
-      
-      if(err == 4060) Print("👉 SOLUSI: Cek Tools > Options > Expert Advisors. Pastikan URL 'https://api.telegram.org' ada di daftar.");
-      if(err == 4014) Print("👉 SOLUSI: WebRequest DILARANG di Strategy Tester/Backtest. Pasang di Chart Live/Demo.");
-      if(err == 5200) Print("👉 SOLUSI: Koneksi internet putus atau URL Token salah.");
+      if(err == 4060) Print("👉 SOLUSI: Cek Tools > Options > Expert Advisors > Centang Allow WebRequest.");
+      if(err == 5200) Print("👉 SOLUSI: Cek koneksi internet.");
    } 
    else if(res != 200) {
-      Print("⚠️ TELEGRAM DITOLAK SERVER. HTTP Code: ", res);
-      Print("Respon Server: ", CharArrayToString(response));
+      Print("⚠️ DITOLAK SERVER (400/401). Cek Token/ChatID. HTTP Code: ", res);
+      Print("Response: ", CharArrayToString(response));
    }
    else {
-      Print("✅ Telegram Berhasil Terkirim!");
+      Print("✅ Telegram Berhasil (HTML Mode)!");
    }
 }
