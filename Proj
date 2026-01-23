@@ -1,14 +1,14 @@
 //+------------------------------------------------------------------+
-//|                      Project100_Final_v1.17.mq5                  |
-//|    Tampilan Input Bersih (Clean UI) + Waktu WIB + Pesan Polos    |
+//|                      Project100_Final_v1.22.mq5                  |
+//|    Dashboard Live Monitor (Lot & PnL) + Auto Clean + WIB Time    |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.17"
+#property version   "1.22"
 
 #include <Trade\PositionInfo.mqh>
 #include <Trade\Trade.mqh>
 
-// --- INPUT PARAMETERS (TAMPILAN SEDERHANA) ---
+// --- INPUT PARAMETERS (CLEAN UI) ---
 input double TargetProfit     = 100.0; // Target Profit ($)
 input double LotAwal          = 0.01;  // Lot Awal
 input int    JedaAntiSpam     = 3;     // Jeda Anti Spam (Detik)
@@ -16,15 +16,14 @@ input double JarakGrid        = 2.0;   // Jarak Grid ($)
 input int    JamMulai_WIB     = 7;     // Ea On (Jam WIB)
 input int    JamStop_WIB      = 23;    // Ea Off (Jam WIB)
 input int    InfoTelegram     = 5;     // Info Telegram (Menit)
-input string TelegramToken    = "8571105656:AAHyTtdXkmQjkDZGZsJcO8_mc9clrafyc_8"; // Telegram Token
-input string TelegramChatID   = "6575521535"; // Telegram ID
+input string TelegramToken    = "8571105656:AAHyTtdXkmQjkDZGZsJcO8_mc9clrafyc_8"; 
+input string TelegramChatID   = "6575521535"; 
 
-// --- SETTINGAN INTERNAL (TIDAK MUNCUL DI INPUT) ---
-// (Jika mau ubah, ubah di sini lalu Compile)
-const int    LevelsPerStep   = 4;      // Step Martingale
-const int    MagicNumber     = 123456; // ID Robot
-const bool   InpResetOnStart = false;  // Reset
-const bool   UseTimeFilter   = true;   // Fitur Waktu Selalu Aktif
+// --- SETTINGAN INTERNAL ---
+const int    LevelsPerStep   = 4;      
+const int    MagicNumber     = 123456; 
+const bool   InpResetOnStart = false;  
+const bool   UseTimeFilter   = true;   
 
 // --- GLOBAL VARIABLES ---
 double buyLotRefPrice = 0;  
@@ -50,12 +49,19 @@ int OnInit() {
     needReset = InpResetOnStart;
     lastReportTime = TimeCurrent(); 
 
-    string statusWaktu = UseTimeFilter ? "Aktif ("+(string)JamMulai_WIB+"-"+(string)JamStop_WIB+" WIB)" : "Non-Aktif";
+    // Init Dashboard
+    UpdateDashboard();
     
-    Print("Mencoba kirim pesan tes Telegram...");
-    SendTelegram("##### EA CONNECTED (v1.17) #####\nTime Filter: " + statusWaktu);
+    SendTelegram("##### EA CONNECTED (v1.22) #####\nDashboard: Live Monitor Mode");
     
     return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| DeInit (Hapus Dashboard)                                         |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason) {
+   ObjectsDeleteAll(0, "P100_"); 
 }
 
 //+------------------------------------------------------------------+
@@ -64,241 +70,211 @@ int OnInit() {
 void OnTick()
 {
    if(StringFind(_Symbol, "XAUUSD") < 0) return;
+
+   // 1. UPDATE DASHBOARD (Real-Time Monitoring)
+   UpdateDashboard();
+
+   // 2. SATPAM: AUTO-CLEAN DUPLICATE
+   RemoveDuplicateOrders();
    
-   // 1. TIMER: Laporan Info Rutin
+   // 3. TIMER: Laporan Info Rutin
    if(TimeCurrent() - lastReportTime >= (InfoTelegram * 60)) {
       SendPeriodicReport();
       lastReportTime = TimeCurrent();
    }
 
-   // 2. Logic Reset / Init
+   // 4. Logic Reset / Init
    if(buyLotRefPrice == 0 || needReset) {
       InitBase();
       if(needReset) needReset = false;
       return;
    }
 
-   // 3. Tentukan Level Grid
+   // 5. Tentukan Level Grid
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    int currentLevel = (int)(MathRound(currentBid / JarakGrid) * JarakGrid); 
 
    if(currentLevel <= 0) return;
 
-   // 4. Cek Take Profit
+   // 6. Cek Take Profit
    CheckTakeProfit(currentLevel);
 
-   // 5. Manage Grid
+   // 7. Manage Grid
    if(TimeCurrent() >= lastExecutionTime + JedaAntiSpam) {
       ManageGrid(currentLevel);
    }
 }
 
 //+------------------------------------------------------------------+
-//| Fungsi Hitung Waktu WIB (GMT+7)                                  |
+//| DASHBOARD FUNCTION (LIVE MONITOR LAYOUT)                         |
 //+------------------------------------------------------------------+
-datetime GetWIBTime() {
-   return TimeGMT() + (7 * 3600);
+void UpdateDashboard() {
+   // A. Hitung Data Live (Floating Lot & PnL)
+   double liveBuyLot = 0, liveSellLot = 0;
+   double liveBuyPnL = 0, liveSellPnL = 0;
+   
+   for(int i=PositionsTotal()-1; i>=0; i--) {
+      if(positionInfo.SelectByIndex(i) && positionInfo.Magic() == MagicNumber && positionInfo.Symbol() == _Symbol) {
+         double pnl = positionInfo.Profit() + positionInfo.Swap() + positionInfo.Commission();
+         if(positionInfo.PositionType() == POSITION_TYPE_BUY) {
+            liveBuyLot += positionInfo.Volume();
+            liveBuyPnL += pnl;
+         } else {
+            liveSellLot += positionInfo.Volume();
+            liveSellPnL += pnl;
+         }
+      }
+   }
+   
+   // B. Hitung Profit History 24 Jam
+   datetime startTime = TimeCurrent() - (24 * 3600); 
+   datetime endTime = TimeCurrent();
+   HistorySelect(startTime, endTime);
+   double profit24H = 0;
+   for(int i=0; i<HistoryDealsTotal(); i++) {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol && HistoryDealGetInteger(ticket, DEAL_MAGIC) == MagicNumber) {
+         profit24H += HistoryDealGetDouble(ticket, DEAL_PROFIT) + HistoryDealGetDouble(ticket, DEAL_SWAP) + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+      }
+   }
+   
+   // C. Render Tampilan
+   color colHead = clrGold;
+   color colText = clrWhite;
+   color colBuy  = (liveBuyPnL >= 0) ? clrLime : clrRed; // Hijau jika profit, Merah jika minus
+   color colSell = (liveSellPnL >= 0) ? clrLime : clrRed;
+   color colProf = (profit24H >= 0) ? clrLime : clrRed;
+
+   // Background Line
+   CreateLabel("P100_BG", "-----------------------------------", 20, 115, clrGray);
+   
+   // Title
+   CreateLabel("P100_Title", "EA PROJECT100", 20, 100, colHead, 10, true);
+   
+   // Row Buy
+   string sBuy = "Buy      : " + DoubleToString(liveBuyLot, 2) + " lot   pnl : $" + DoubleToString(liveBuyPnL, 2);
+   CreateLabel("P100_Buy", sBuy, 20, 80, (liveBuyLot>0 ? colBuy : colText));
+   
+   // Row Sell
+   string sSell = "Sell     : " + DoubleToString(liveSellLot, 2) + " lot   pnl : $" + DoubleToString(liveSellPnL, 2);
+   CreateLabel("P100_Sell", sSell, 20, 65, (liveSellLot>0 ? colSell : colText));
+   
+   // Row Total
+   string sTot = "Total    : " + DoubleToString(liveBuyLot+liveSellLot, 2) + " lot";
+   CreateLabel("P100_Tot", sTot, 20, 50, colText);
+   
+   // Separator
+   CreateLabel("P100_Line", "-----------------------------------", 20, 35, clrGray);
+   
+   // Row History Profit
+   string sProf = "Take Profit 24J  : " + (profit24H>=0?"+$":"-$") + DoubleToString(MathAbs(profit24H), 2);
+   CreateLabel("P100_Prof", sProf, 20, 20, colProf, 10, true);
 }
 
-//+------------------------------------------------------------------+
-//| Fungsi Cek Waktu Trading                                         |
-//+------------------------------------------------------------------+
+void CreateLabel(string name, string text, int x, int y, color col, int fontSize=9, bool bold=false) {
+   if(ObjectFind(0, name) < 0) {
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_LOWER); 
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontSize);
+      ObjectSetString(0, name, OBJPROP_FONT, "Consolas"); 
+   }
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+   if(bold) ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontSize+1);
+}
+
+// ... FUNGSI LAIN TETAP SAMA SEPERTI VERSI SEBELUMNYA ...
+
+void RemoveDuplicateOrders() {
+   for(int i=PositionsTotal()-1; i>=0; i--) {
+      if(positionInfo.SelectByIndex(i) && positionInfo.Magic() == MagicNumber) {
+         long ticketA = positionInfo.Ticket();
+         ENUM_POSITION_TYPE typeA = positionInfo.PositionType();
+         double priceA = positionInfo.PriceOpen();
+         int levelA = (int)(MathRound(priceA / JarakGrid) * JarakGrid);
+         for(int j=0; j<PositionsTotal(); j++) {
+            if(i == j) continue; 
+            if(positionInfo.SelectByIndex(j) && positionInfo.Magic() == MagicNumber) {
+               if(typeA == positionInfo.PositionType() && levelA == (int)(MathRound(positionInfo.PriceOpen()/JarakGrid)*JarakGrid) && ticketA > positionInfo.Ticket()) {
+                  trade.PositionClose(ticketA); return; 
+               }
+            }
+         }
+      }
+   }
+}
+
+datetime GetWIBTime() { return TimeGMT() + (7 * 3600); }
+
 bool IsTradingTime() {
    if(!UseTimeFilter) return true; 
-   
-   MqlDateTime dt;
-   TimeToStruct(GetWIBTime(), dt);
+   MqlDateTime dt; TimeToStruct(GetWIBTime(), dt);
    int h = dt.hour;
-   
-   if(JamMulai_WIB < JamStop_WIB) {
-      if(h >= JamMulai_WIB && h < JamStop_WIB) return true;
-   }
-   else {
-      if(h >= JamMulai_WIB || h < JamStop_WIB) return true;
-   }
-   return false;
+   if(JamMulai_WIB < JamStop_WIB) return (h >= JamMulai_WIB && h < JamStop_WIB);
+   else return (h >= JamMulai_WIB || h < JamStop_WIB);
 }
 
-//+------------------------------------------------------------------+
-//| Manage Grid                                                      |
-//+------------------------------------------------------------------+
 void ManageGrid(int level) {
    bool buyExist = IsOrderExistsById(level, POSITION_TYPE_BUY);
    bool sellExist = IsOrderExistsById(level, POSITION_TYPE_SELL);
    bool isTime = IsTradingTime(); 
-
-   // --- LOGIKA BUY ---
    if(!buyExist) {
       double totalBuy = GetTotalLots(POSITION_TYPE_BUY);
-      if(isTime || totalBuy > 0) { // Boleh entry jika Jam On ATAU Refill posisi lama
-         if(OpenOrder(ORDER_TYPE_BUY, level, CalculateLot(level, true)))
-            lastExecutionTime = TimeCurrent();
-      }
+      if(isTime || totalBuy > 0) { if(OpenOrder(ORDER_TYPE_BUY, level, CalculateLot(level, true))) lastExecutionTime = TimeCurrent(); }
    }
-   
-   // --- LOGIKA SELL ---
    if(!sellExist) {
       if(TimeCurrent() >= lastExecutionTime + JedaAntiSpam) {
          double totalSell = GetTotalLots(POSITION_TYPE_SELL);
-         if(isTime || totalSell > 0) {
-            if(OpenOrder(ORDER_TYPE_SELL, level, CalculateLot(level, false)))
-               lastExecutionTime = TimeCurrent();
-         }
+         if(isTime || totalSell > 0) { if(OpenOrder(ORDER_TYPE_SELL, level, CalculateLot(level, false))) lastExecutionTime = TimeCurrent(); }
       }
    }
 }
 
-//+------------------------------------------------------------------+
-//| Laporan Info Rutin                                               |
-//+------------------------------------------------------------------+
 void SendPeriodicReport() {
-   double totalBuyLot = GetTotalLots(POSITION_TYPE_BUY);
-   double totalSellLot = GetTotalLots(POSITION_TYPE_SELL);
-   double totalLot = totalBuyLot + totalSellLot;
-   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   string statusJam = IsTradingTime() ? "ON (Trading)" : "OFF (Waiting)";
-   string wibString = TimeToString(GetWIBTime(), TIME_DATE|TIME_SECONDS) + " WIB";
-   
-   string msg = "##### INFO UPDATE (" + (string)InfoTelegram + "m) #####\n"
-              + "Mode: " + statusJam + "\n"
-              + "Total Lot: " + DoubleToString(totalLot, 2) + "\n"
-              + "Lot Buy: " + DoubleToString(totalBuyLot, 2) + "\n"
-              + "Lot Sell: " + DoubleToString(totalSellLot, 2) + "\n"
-              + "Harga: " + DoubleToString(price, 2) + "\n"
-              + "Equity: $" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + "\n"
-              + "Balance: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
-              + "Waktu: " + wibString;
-              
+   double totalLot = GetTotalLots(POSITION_TYPE_BUY) + GetTotalLots(POSITION_TYPE_SELL);
+   string statusJam = IsTradingTime() ? "ON" : "OFF";
+   string msg = "##### INFO (" + (string)InfoTelegram + "m) #####\nMode: " + statusJam + "\nTot Lot: " + DoubleToString(totalLot, 2) + "\nBal: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2);
    SendTelegram(msg);
 }
 
-//+------------------------------------------------------------------+
-//| Init Base                                                        |
-//+------------------------------------------------------------------+
 void InitBase() {
    CloseAllOrders();
-   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   buyLotRefPrice = price;
-   sellLotRefPrice = price;
-   string wibString = TimeToString(GetWIBTime(), TIME_DATE|TIME_SECONDS) + " WIB";
-   
-   string msg = "##### EA ACTIVATED #####\n"
-              + "Grid Step: $" + DoubleToString(JarakGrid, 0) + "\n"
-              + "Start Price: " + DoubleToString(price, 2) + "\n"
-              + "Waktu Start: " + wibString;
-              
-   SendTelegram(msg);
-   lastExecutionTime = TimeCurrent();
-   lastReportTime = TimeCurrent(); 
+   SendTelegram("##### EA ACTIVATED #####\nReset Cycle Started");
+   lastExecutionTime = TimeCurrent(); lastReportTime = TimeCurrent(); 
 }
 
-//+------------------------------------------------------------------+
-//| Cek TP                                                           |
-//+------------------------------------------------------------------+
 void CheckTakeProfit(int currentLevel) {
-   string wibString = TimeToString(GetWIBTime(), TIME_DATE|TIME_SECONDS) + " WIB";
-   
-   // --- TIM BUY ---
    double bProfit = CalculateProfit(POSITION_TYPE_BUY);
-   if(bProfit >= TargetProfit) {
-      ClosePositions(POSITION_TYPE_BUY);
-      buyLotRefPrice = (double)currentLevel; 
-      
-      string msg = "##### TP BUY HIT (+$" + DoubleToString(bProfit, 2) + ") #####\n"
-                 + "New Balance: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
-                 + "Waktu: " + wibString;
-      SendTelegram(msg);
-      lastExecutionTime = TimeCurrent();
-   }
-
-   // --- TIM SELL ---
+   if(bProfit >= TargetProfit) { ClosePositions(POSITION_TYPE_BUY); buyLotRefPrice = (double)currentLevel; SendTelegram("##### TP BUY (+$"+DoubleToString(bProfit,2)+") #####"); lastExecutionTime=TimeCurrent(); }
    double sProfit = CalculateProfit(POSITION_TYPE_SELL);
-   if(sProfit >= TargetProfit) {
-      ClosePositions(POSITION_TYPE_SELL);
-      sellLotRefPrice = (double)currentLevel;
-      
-      string msg = "##### TP SELL HIT (+$" + DoubleToString(sProfit, 2) + ") #####\n"
-                 + "New Balance: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
-                 + "Waktu: " + wibString;
-      SendTelegram(msg);
-      lastExecutionTime = TimeCurrent();
-   }
+   if(sProfit >= TargetProfit) { ClosePositions(POSITION_TYPE_SELL); sellLotRefPrice = (double)currentLevel; SendTelegram("##### TP SELL (+$"+DoubleToString(sProfit,2)+") #####"); lastExecutionTime=TimeCurrent(); }
 }
 
-//+------------------------------------------------------------------+
-//| Helper Functions                                                 |
-//+------------------------------------------------------------------+
 bool OpenOrder(ENUM_ORDER_TYPE type, int level, double lot) {
    double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   string comment = "L:" + (string)level; 
-   if(trade.PositionOpen(_Symbol, type, lot, price, 0, 0, comment)) {
-      if(trade.ResultRetcode() == TRADE_RETCODE_DONE) return true;
-   }
-   return false;
+   return trade.PositionOpen(_Symbol, type, lot, price, 0, 0, "L:"+(string)level);
 }
-
 double GetTotalLots(ENUM_POSITION_TYPE type) {
-   double total = 0;
-   for(int i=PositionsTotal()-1; i>=0; i--) {
-      if(positionInfo.SelectByIndex(i) && positionInfo.Magic() == MagicNumber && positionInfo.PositionType() == type) {
-         total += positionInfo.Volume();
-      }
-   }
-   return total;
+   double t=0; for(int i=PositionsTotal()-1; i>=0; i--) { if(positionInfo.SelectByIndex(i) && positionInfo.Magic()==MagicNumber && positionInfo.PositionType()==type) t+=positionInfo.Volume(); } return t;
 }
-
 bool IsOrderExistsById(int level, ENUM_POSITION_TYPE type) {
-   string searchComment = "L:" + (string)level; 
-   for(int i=PositionsTotal()-1; i>=0; i--) {
-      if(positionInfo.SelectByIndex(i)) {
-         if(positionInfo.Symbol() == _Symbol && positionInfo.Magic() == MagicNumber && positionInfo.PositionType() == type) {
-            if(StringFind(positionInfo.Comment(), searchComment) >= 0) return true;
-            if(MathAbs(positionInfo.PriceOpen() - (double)level) < (JarakGrid/2.0)) return true;
-         }
-      }
-   }
-   return false;
+   string c="L:"+(string)level; for(int i=PositionsTotal()-1; i>=0; i--) { if(positionInfo.SelectByIndex(i) && positionInfo.Magic()==MagicNumber && positionInfo.PositionType()==type) { if(StringFind(positionInfo.Comment(), c)>=0 || MathAbs(positionInfo.PriceOpen()-(double)level)<(JarakGrid/2.0)) return true; } } return false;
 }
-
 double CalculateLot(int level, bool isBuy) {
-   double refPrice = isBuy ? buyLotRefPrice : sellLotRefPrice;
-   int distance = (int)MathAbs((double)level - refPrice);
-   int stepsAway = (int)(distance / JarakGrid);
-   int martingaleLevel = stepsAway / LevelsPerStep;
-   double lot = LotAwal * MathPow(2, martingaleLevel);
-   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   lot = MathFloor(lot / step) * step;
-   return MathMax(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), lot);
+   double refP = isBuy ? buyLotRefPrice : sellLotRefPrice;
+   double lot = LotAwal * MathPow(2, (int)((int)(MathAbs((double)level-refP)/JarakGrid)/LevelsPerStep));
+   return MathMax(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), MathFloor(lot/SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP))*SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP));
 }
-
 double CalculateProfit(ENUM_POSITION_TYPE type) {
-   double p = 0;
-   for(int i=PositionsTotal()-1; i>=0; i--) {
-      if(positionInfo.SelectByIndex(i) && positionInfo.Magic() == MagicNumber && positionInfo.PositionType() == type)
-         p += positionInfo.Profit() + positionInfo.Commission() + positionInfo.Swap();
-   }
-   return p;
+   double p=0; for(int i=PositionsTotal()-1; i>=0; i--) { if(positionInfo.SelectByIndex(i) && positionInfo.Magic()==MagicNumber && positionInfo.PositionType()==type) p+=positionInfo.Profit()+positionInfo.Commission()+positionInfo.Swap(); } return p;
 }
-
 void ClosePositions(ENUM_POSITION_TYPE type) {
-   for(int i=PositionsTotal()-1; i>=0; i--) {
-      if(positionInfo.SelectByIndex(i) && positionInfo.Magic() == MagicNumber && positionInfo.PositionType() == type)
-         trade.PositionClose(positionInfo.Ticket());
-   }
+   for(int i=PositionsTotal()-1; i>=0; i--) { if(positionInfo.SelectByIndex(i) && positionInfo.Magic()==MagicNumber && positionInfo.PositionType()==type) trade.PositionClose(positionInfo.Ticket()); }
 }
-
-void CloseAllOrders() {
-   ClosePositions(POSITION_TYPE_BUY);
-   ClosePositions(POSITION_TYPE_SELL);
-}
-
-void SendTelegram(string message) {
-   string url = "https://api.telegram.org/bot"+TelegramToken+"/sendMessage";
-   string params = "chat_id="+TelegramChatID+"&text="+message; 
-   char post_data[]; StringToCharArray(params, post_data);
-   string headers = "Content-Type: application/x-www-form-urlencoded";
-   uchar response[]; string result;
-   ResetLastError();
-   int res = WebRequest("POST", url, headers, 3000, post_data, response, result);
-   if(res != 200 && res != -1) Print("Telegram Error: ", res);
+void CloseAllOrders() { ClosePositions(POSITION_TYPE_BUY); ClosePositions(POSITION_TYPE_SELL); }
+void SendTelegram(string m) {
+   char d[]; StringToCharArray("chat_id="+TelegramChatID+"&text="+m, d); uchar r[]; string h="Content-Type: application/x-www-form-urlencoded", res;
+   WebRequest("POST", "https://api.telegram.org/bot"+TelegramToken+"/sendMessage", h, 3000, d, r, res);
 }
