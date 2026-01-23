@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
-//|                      Project100_Final_v1.22.mq5                  |
-//|    Dashboard Live Monitor (Lot & PnL) + Auto Clean + WIB Time    |
+//|                      Project100_Final_v1.23.mq5                  |
+//|    Fix Warning (ulong type) + Dashboard + Auto Clean + WIB       |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.22"
+#property version   "1.23"
 
 #include <Trade\PositionInfo.mqh>
 #include <Trade\Trade.mqh>
@@ -52,7 +52,7 @@ int OnInit() {
     // Init Dashboard
     UpdateDashboard();
     
-    SendTelegram("##### EA CONNECTED (v1.22) #####\nDashboard: Live Monitor Mode");
+    SendTelegram("##### EA CONNECTED (v1.23) #####\nSystem: All Green (No Errors)");
     
     return(INIT_SUCCEEDED);
 }
@@ -109,7 +109,6 @@ void OnTick()
 //| DASHBOARD FUNCTION (LIVE MONITOR LAYOUT)                         |
 //+------------------------------------------------------------------+
 void UpdateDashboard() {
-   // A. Hitung Data Live (Floating Lot & PnL)
    double liveBuyLot = 0, liveSellLot = 0;
    double liveBuyPnL = 0, liveSellPnL = 0;
    
@@ -126,7 +125,7 @@ void UpdateDashboard() {
       }
    }
    
-   // B. Hitung Profit History 24 Jam
+   // Hitung History 24 Jam
    datetime startTime = TimeCurrent() - (24 * 3600); 
    datetime endTime = TimeCurrent();
    HistorySelect(startTime, endTime);
@@ -138,35 +137,26 @@ void UpdateDashboard() {
       }
    }
    
-   // C. Render Tampilan
    color colHead = clrGold;
    color colText = clrWhite;
-   color colBuy  = (liveBuyPnL >= 0) ? clrLime : clrRed; // Hijau jika profit, Merah jika minus
+   color colBuy  = (liveBuyPnL >= 0) ? clrLime : clrRed; 
    color colSell = (liveSellPnL >= 0) ? clrLime : clrRed;
    color colProf = (profit24H >= 0) ? clrLime : clrRed;
 
-   // Background Line
    CreateLabel("P100_BG", "-----------------------------------", 20, 115, clrGray);
-   
-   // Title
    CreateLabel("P100_Title", "EA PROJECT100", 20, 100, colHead, 10, true);
    
-   // Row Buy
    string sBuy = "Buy      : " + DoubleToString(liveBuyLot, 2) + " lot   pnl : $" + DoubleToString(liveBuyPnL, 2);
    CreateLabel("P100_Buy", sBuy, 20, 80, (liveBuyLot>0 ? colBuy : colText));
    
-   // Row Sell
    string sSell = "Sell     : " + DoubleToString(liveSellLot, 2) + " lot   pnl : $" + DoubleToString(liveSellPnL, 2);
    CreateLabel("P100_Sell", sSell, 20, 65, (liveSellLot>0 ? colSell : colText));
    
-   // Row Total
    string sTot = "Total    : " + DoubleToString(liveBuyLot+liveSellLot, 2) + " lot";
    CreateLabel("P100_Tot", sTot, 20, 50, colText);
    
-   // Separator
    CreateLabel("P100_Line", "-----------------------------------", 20, 35, clrGray);
    
-   // Row History Profit
    string sProf = "Take Profit 24J  : " + (profit24H>=0?"+$":"-$") + DoubleToString(MathAbs(profit24H), 2);
    CreateLabel("P100_Prof", sProf, 20, 20, colProf, 10, true);
 }
@@ -185,20 +175,29 @@ void CreateLabel(string name, string text, int x, int y, color col, int fontSize
    if(bold) ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontSize+1);
 }
 
-// ... FUNGSI LAIN TETAP SAMA SEPERTI VERSI SEBELUMNYA ...
-
+//+------------------------------------------------------------------+
+//| FUNGSI PEMBERSIH DUPLIKAT (FIX TIPE DATA ULONG)                  |
+//+------------------------------------------------------------------+
 void RemoveDuplicateOrders() {
    for(int i=PositionsTotal()-1; i>=0; i--) {
       if(positionInfo.SelectByIndex(i) && positionInfo.Magic() == MagicNumber) {
-         long ticketA = positionInfo.Ticket();
+         // PERBAIKAN: Gunakan ulong (Unsigned Long) agar tidak warning
+         ulong ticketA = positionInfo.Ticket();
          ENUM_POSITION_TYPE typeA = positionInfo.PositionType();
          double priceA = positionInfo.PriceOpen();
          int levelA = (int)(MathRound(priceA / JarakGrid) * JarakGrid);
+         
          for(int j=0; j<PositionsTotal(); j++) {
             if(i == j) continue; 
             if(positionInfo.SelectByIndex(j) && positionInfo.Magic() == MagicNumber) {
-               if(typeA == positionInfo.PositionType() && levelA == (int)(MathRound(positionInfo.PriceOpen()/JarakGrid)*JarakGrid) && ticketA > positionInfo.Ticket()) {
-                  trade.PositionClose(ticketA); return; 
+               
+               // PERBAIKAN: Comparison aman (ulong vs ulong)
+               if(typeA == positionInfo.PositionType() && 
+                  levelA == (int)(MathRound(positionInfo.PriceOpen()/JarakGrid)*JarakGrid) && 
+                  ticketA > positionInfo.Ticket()) {
+                  
+                  trade.PositionClose(ticketA); 
+                  return; 
                }
             }
          }
