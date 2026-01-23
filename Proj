@@ -1,31 +1,30 @@
 //+------------------------------------------------------------------+
-//|                      Project100_Final_v1.23.mq5                  |
-//|    Fix Warning (ulong type) + Dashboard + Auto Clean + WIB       |
+//|                      Project100_Final_v1.24.mq5                  |
+//|    Fix Tampilan Dashboard (Geser Kiri) + Kotak Background        |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "1.23"
+#property version   "1.24"
 
 #include <Trade\PositionInfo.mqh>
 #include <Trade\Trade.mqh>
 
-// --- INPUT PARAMETERS (CLEAN UI) ---
-input double TargetProfit     = 100.0; // Target Profit ($)
-input double LotAwal          = 0.01;  // Lot Awal
-input int    JedaAntiSpam     = 3;     // Jeda Anti Spam (Detik)
-input double JarakGrid        = 2.0;   // Jarak Grid ($)
-input int    JamMulai_WIB     = 7;     // Ea On (Jam WIB)
-input int    JamStop_WIB      = 23;    // Ea Off (Jam WIB)
-input int    InfoTelegram     = 5;     // Info Telegram (Menit)
+// --- INPUT PARAMETERS ---
+input double TargetProfit     = 100.0; 
+input double LotAwal          = 0.01;  
+input int    JedaAntiSpam     = 3;     
+input double JarakGrid        = 2.0;   
+input int    JamMulai_WIB     = 7;     
+input int    JamStop_WIB      = 23;    
+input int    InfoTelegram     = 5;     
 input string TelegramToken    = "8571105656:AAHyTtdXkmQjkDZGZsJcO8_mc9clrafyc_8"; 
 input string TelegramChatID   = "6575521535"; 
 
-// --- SETTINGAN INTERNAL ---
+// --- INTERNAL ---
 const int    LevelsPerStep   = 4;      
 const int    MagicNumber     = 123456; 
 const bool   InpResetOnStart = false;  
 const bool   UseTimeFilter   = true;   
 
-// --- GLOBAL VARIABLES ---
 double buyLotRefPrice = 0;  
 double sellLotRefPrice = 0;
 datetime lastExecutionTime = 0; 
@@ -49,17 +48,12 @@ int OnInit() {
     needReset = InpResetOnStart;
     lastReportTime = TimeCurrent(); 
 
-    // Init Dashboard
     UpdateDashboard();
-    
-    SendTelegram("##### EA CONNECTED (v1.23) #####\nSystem: All Green (No Errors)");
+    SendTelegram("##### EA CONNECTED (v1.24) #####\nDashboard Fixed");
     
     return(INIT_SUCCEEDED);
 }
 
-//+------------------------------------------------------------------+
-//| DeInit (Hapus Dashboard)                                         |
-//+------------------------------------------------------------------+
 void OnDeinit(const int reason) {
    ObjectsDeleteAll(0, "P100_"); 
 }
@@ -71,42 +65,34 @@ void OnTick()
 {
    if(StringFind(_Symbol, "XAUUSD") < 0) return;
 
-   // 1. UPDATE DASHBOARD (Real-Time Monitoring)
    UpdateDashboard();
-
-   // 2. SATPAM: AUTO-CLEAN DUPLICATE
    RemoveDuplicateOrders();
    
-   // 3. TIMER: Laporan Info Rutin
    if(TimeCurrent() - lastReportTime >= (InfoTelegram * 60)) {
       SendPeriodicReport();
       lastReportTime = TimeCurrent();
    }
 
-   // 4. Logic Reset / Init
    if(buyLotRefPrice == 0 || needReset) {
       InitBase();
       if(needReset) needReset = false;
       return;
    }
 
-   // 5. Tentukan Level Grid
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    int currentLevel = (int)(MathRound(currentBid / JarakGrid) * JarakGrid); 
 
    if(currentLevel <= 0) return;
 
-   // 6. Cek Take Profit
    CheckTakeProfit(currentLevel);
 
-   // 7. Manage Grid
    if(TimeCurrent() >= lastExecutionTime + JedaAntiSpam) {
       ManageGrid(currentLevel);
    }
 }
 
 //+------------------------------------------------------------------+
-//| DASHBOARD FUNCTION (LIVE MONITOR LAYOUT)                         |
+//| DASHBOARD BARU (LEBIH RAPI & ADA BACKGROUND)                     |
 //+------------------------------------------------------------------+
 void UpdateDashboard() {
    double liveBuyLot = 0, liveSellLot = 0;
@@ -125,7 +111,6 @@ void UpdateDashboard() {
       }
    }
    
-   // Hitung History 24 Jam
    datetime startTime = TimeCurrent() - (24 * 3600); 
    datetime endTime = TimeCurrent();
    HistorySelect(startTime, endTime);
@@ -137,28 +122,47 @@ void UpdateDashboard() {
       }
    }
    
+   // --- SETTING TAMPILAN ---
+   int xBase = 240; // Geser 240 pixel dari kanan (Biar gak nabrak harga)
+   int yBase = 130; // Jarak dari bawah
+   
+   // 1. Buat Kotak Background Hitam
+   if(ObjectFind(0, "P100_BG_Rect") < 0) {
+      ObjectCreate(0, "P100_BG_Rect", OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, "P100_BG_Rect", OBJPROP_CORNER, CORNER_RIGHT_LOWER);
+      ObjectSetInteger(0, "P100_BG_Rect", OBJPROP_XDISTANCE, xBase); 
+      ObjectSetInteger(0, "P100_BG_Rect", OBJPROP_YDISTANCE, 20); 
+      ObjectSetInteger(0, "P100_BG_Rect", OBJPROP_XSIZE, 230); // Lebar Kotak
+      ObjectSetInteger(0, "P100_BG_Rect", OBJPROP_YSIZE, 110); // Tinggi Kotak
+      ObjectSetInteger(0, "P100_BG_Rect", OBJPROP_BGCOLOR, clrBlack);
+      ObjectSetInteger(0, "P100_BG_Rect", OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, "P100_BG_Rect", OBJPROP_COLOR, clrGray); // Warna List Pinggir
+   }
+
    color colHead = clrGold;
    color colText = clrWhite;
    color colBuy  = (liveBuyPnL >= 0) ? clrLime : clrRed; 
    color colSell = (liveSellPnL >= 0) ? clrLime : clrRed;
    color colProf = (profit24H >= 0) ? clrLime : clrRed;
 
-   CreateLabel("P100_BG", "-----------------------------------", 20, 115, clrGray);
-   CreateLabel("P100_Title", "EA PROJECT100", 20, 100, colHead, 10, true);
+   // 2. Tulisan Judul
+   CreateLabel("P100_Title", "EA PROJECT100", xBase+15, 105, colHead, 10, true);
    
-   string sBuy = "Buy      : " + DoubleToString(liveBuyLot, 2) + " lot   pnl : $" + DoubleToString(liveBuyPnL, 2);
-   CreateLabel("P100_Buy", sBuy, 20, 80, (liveBuyLot>0 ? colBuy : colText));
+   // 3. Baris Buy
+   string sBuy = "Buy   : " + DoubleToString(liveBuyLot, 2) + " L  ($ " + DoubleToString(liveBuyPnL, 2)+")";
+   CreateLabel("P100_Buy", sBuy, xBase+15, 85, (liveBuyLot>0 ? colBuy : colText));
    
-   string sSell = "Sell     : " + DoubleToString(liveSellLot, 2) + " lot   pnl : $" + DoubleToString(liveSellPnL, 2);
-   CreateLabel("P100_Sell", sSell, 20, 65, (liveSellLot>0 ? colSell : colText));
+   // 4. Baris Sell
+   string sSell = "Sell  : " + DoubleToString(liveSellLot, 2) + " L  ($ " + DoubleToString(liveSellPnL, 2)+")";
+   CreateLabel("P100_Sell", sSell, xBase+15, 65, (liveSellLot>0 ? colSell : colText));
    
-   string sTot = "Total    : " + DoubleToString(liveBuyLot+liveSellLot, 2) + " lot";
-   CreateLabel("P100_Tot", sTot, 20, 50, colText);
+   // 5. Baris Total
+   string sTot = "Total : " + DoubleToString(liveBuyLot+liveSellLot, 2) + " Lot";
+   CreateLabel("P100_Tot", sTot, xBase+15, 45, colText);
    
-   CreateLabel("P100_Line", "-----------------------------------", 20, 35, clrGray);
-   
-   string sProf = "Take Profit 24J  : " + (profit24H>=0?"+$":"-$") + DoubleToString(MathAbs(profit24H), 2);
-   CreateLabel("P100_Prof", sProf, 20, 20, colProf, 10, true);
+   // 6. Baris Profit 24 Jam
+   string sProf = "TP 24J: " + (profit24H>=0?"+$":"-$") + DoubleToString(MathAbs(profit24H), 2);
+   CreateLabel("P100_Prof", sProf, xBase+15, 25, colProf, 10, true);
 }
 
 void CreateLabel(string name, string text, int x, int y, color col, int fontSize=9, bool bold=false) {
@@ -168,36 +172,27 @@ void CreateLabel(string name, string text, int x, int y, color col, int fontSize
       ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontSize);
       ObjectSetString(0, name, OBJPROP_FONT, "Consolas"); 
    }
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x); // Posisi relatif terhadap BG
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
    ObjectSetString(0, name, OBJPROP_TEXT, text);
    ObjectSetInteger(0, name, OBJPROP_COLOR, col);
    if(bold) ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontSize+1);
 }
 
-//+------------------------------------------------------------------+
-//| FUNGSI PEMBERSIH DUPLIKAT (FIX TIPE DATA ULONG)                  |
-//+------------------------------------------------------------------+
+// ... FUNGSI LAIN TETAP SAMA ...
+
 void RemoveDuplicateOrders() {
    for(int i=PositionsTotal()-1; i>=0; i--) {
       if(positionInfo.SelectByIndex(i) && positionInfo.Magic() == MagicNumber) {
-         // PERBAIKAN: Gunakan ulong (Unsigned Long) agar tidak warning
          ulong ticketA = positionInfo.Ticket();
          ENUM_POSITION_TYPE typeA = positionInfo.PositionType();
          double priceA = positionInfo.PriceOpen();
          int levelA = (int)(MathRound(priceA / JarakGrid) * JarakGrid);
-         
          for(int j=0; j<PositionsTotal(); j++) {
             if(i == j) continue; 
             if(positionInfo.SelectByIndex(j) && positionInfo.Magic() == MagicNumber) {
-               
-               // PERBAIKAN: Comparison aman (ulong vs ulong)
-               if(typeA == positionInfo.PositionType() && 
-                  levelA == (int)(MathRound(positionInfo.PriceOpen()/JarakGrid)*JarakGrid) && 
-                  ticketA > positionInfo.Ticket()) {
-                  
-                  trade.PositionClose(ticketA); 
-                  return; 
+               if(typeA == positionInfo.PositionType() && levelA == (int)(MathRound(positionInfo.PriceOpen()/JarakGrid)*JarakGrid) && ticketA > positionInfo.Ticket()) {
+                  trade.PositionClose(ticketA); return; 
                }
             }
          }
