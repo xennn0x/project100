@@ -1,0 +1,422 @@
+//+------------------------------------------------------------------+
+//|                      Project100_Final_v1.27.mq5                  |
+//|    Daily Reset (00:00 WIB) + Daily Recap Report + Dashboard      |
+//+------------------------------------------------------------------+
+#property strict
+#property version   "1.27"
+
+#include <Trade\PositionInfo.mqh>
+#include <Trade\Trade.mqh>
+
+// --- INPUT PARAMETERS ---
+input double TargetProfit     = 100.0; 
+input double LotAwal          = 0.01;  
+input int    JedaAntiSpam     = 3;     
+input double JarakGrid        = 2.0;   
+input int    JamMulai_WIB     = 7;     
+input int    JamStop_WIB      = 23;    
+input int    InfoTelegram     = 5;     
+input string TelegramToken    = "8571105656:AAHyTtdXkmQjkDZGZsJcO8_mc9clrafyc_8"; 
+input string TelegramChatID   = "6575521535"; 
+
+// --- INTERNAL ---
+const int    LevelsPerStep   = 4;      
+const int    MagicNumber     = 123456; 
+const bool   InpResetOnStart = false;  
+const bool   UseTimeFilter   = true;   
+
+// --- VARIABEL REKAM JEJAK ---
+string GV_DD_Money = "P100_MaxDD_Money"; 
+string GV_DD_Perc  = "P100_MaxDD_Perc";
+string GV_DD_Time  = "P100_MaxDD_Time";
+
+double buyLotRefPrice = 0;  
+double sellLotRefPrice = 0;
+datetime lastExecutionTime = 0; 
+datetime lastReportTime = 0; 
+bool needReset = false;
+int lastDayWIB = -1; // Penanda Hari untuk Reset Harian
+
+CPositionInfo positionInfo;
+CTrade trade;
+
+//+------------------------------------------------------------------+
+//| Init                                                             |
+//+------------------------------------------------------------------+
+int OnInit() {
+    trade.SetExpertMagicNumber(MagicNumber);
+    trade.SetTypeFillingBySymbol(_Symbol);
+    
+    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    buyLotRefPrice = price;
+    sellLotRefPrice = price;
+    
+    needReset = InpResetOnStart;
+    lastReportTime = TimeCurrent(); 
+
+    // Init Global Variable Drawdown
+    if(!GlobalVariableCheck(GV_DD_Money)) GlobalVariableSet(GV_DD_Money, 0);
+    if(!GlobalVariableCheck(GV_DD_Perc)) GlobalVariableSet(GV_DD_Perc, 0);
+    if(!GlobalVariableCheck(GV_DD_Time)) GlobalVariableSet(GV_DD_Time, 0);
+
+    // Set Hari Ini sebagai hari awal (agar tidak lapor profit kemarin saat baru dipasang)
+    MqlDateTime dt;
+    TimeToStruct(GetWIBTime(), dt);
+    lastDayWIB = dt.day;
+
+    UpdateDashboard();
+    
+    string wib = TimeToString(GetWIBTime(), TIME_DATE|TIME_MINUTES) + " WIB";
+    SendTelegram("✅ EA STARTED (v1.27)\nMode: Daily Reset (WIB)\nWaktu: " + wib);
+    
+    return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason) {
+   ObjectsDeleteAll(0, "P100_"); 
+   SendTelegram("⛔ EA STOPPED\nProject100 dimatikan.");
+}
+
+//+------------------------------------------------------------------+
+//| OnTick                                                           |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   if(StringFind(_Symbol, "XAUUSD") < 0) return;
+
+   // 1. CEK GANTI HARI (DAILY RESET)
+   CheckDailyReset();
+
+   // 2. UPDATE DASHBOARD & DRAWDOWN
+   UpdateDashboard();
+   CheckMaxDrawdown(); 
+
+   // 3. AUTO-CLEAN DUPLICATE
+   RemoveDuplicateOrders();
+   
+   // 4. LAPORAN RUTIN
+   if(TimeCurrent() - lastReportTime >= (InfoTelegram * 60)) {
+      SendPeriodicReport();
+      lastReportTime = TimeCurrent();
+   }
+
+   // 5. Logic Reset
+   if(buyLotRefPrice == 0 || needReset) {
+      InitBase();
+      if(needReset) needReset = false;
+      return;
+   }
+
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   int currentLevel = (int)(MathRound(currentBid / JarakGrid) * JarakGrid); 
+
+   if(currentLevel <= 0) return;
+
+   CheckTakeProfit(currentLevel);
+
+   if(TimeCurrent() >= lastExecutionTime + JedaAntiSpam) {
+      ManageGrid(currentLevel);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| FUNGSI CEK GANTI HARI & KIRIM LAPORAN AKHIR HARI                 |
+//+------------------------------------------------------------------+
+void CheckDailyReset() {
+   datetime nowWIB = GetWIBTime();
+   MqlDateTime dt;
+   TimeToStruct(nowWIB, dt);
+   
+   // Jika tanggal di MT5 berubah (berarti sudah ganti hari di WIB)
+   if(lastDayWIB != -1 && dt.day != lastDayWIB) {
+      // Kirim Laporan Rekap Hari Kemarin SEBELUM update hari
+      SendDailyRecap();
+      
+      // Update Hari Sekarang
+      lastDayWIB = dt.day;
+      
+      // Refresh Dashboard (Otomatis 0 karena filternya 'Today')
+      UpdateDashboard();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| FUNGSI KIRIM LAPORAN HARIAN (RECAP)                              |
+//+------------------------------------------------------------------+
+void SendDailyRecap() {
+   // Hitung Rentang Waktu KEMARIN (00:00 - 23:59 WIB)
+   datetime nowWIB = GetWIBTime();
+   MqlDateTime dt;
+   TimeToStruct(nowWIB, dt);
+   
+   // Set ke Awal Hari Ini (00:00:00)
+   dt.hour = 0; dt.min = 0; dt.sec = 0;
+   datetime startOfToday = StructToTime(dt);
+   
+   datetime startOfYesterday = startOfToday - 86400; // Mundur 24 jam
+   datetime endOfYesterday = startOfToday - 1;       // Detik sebelum hari ini
+   
+   // Loop History untuk cari profit KEMARIN
+   HistorySelect(0, TimeCurrent()); // Load semua history dulu
+   int totalDeals = HistoryDealsTotal();
+   double dailyProfit = 0;
+   double dailyLot = 0;
+   
+   for(int i=0; i<totalDeals; i++) {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != _Symbol) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != MagicNumber) continue;
+      
+      // Konversi Waktu Deal Server ke WIB
+      datetime dealTimeServer = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+      datetime dealTimeWIB = dealTimeServer + (7*3600) - (TimeGMT() - TimeCurrent()); // Estimasi Offset
+      // Cara paling aman: Asumsikan TimeGMT() benar
+      dealTimeWIB = TimeGMT() + (7*3600) - (TimeCurrent() - dealTimeServer);
+      
+      // Cek apakah deal terjadi KEMARIN
+      if(dealTimeWIB >= startOfYesterday && dealTimeWIB <= endOfYesterday) {
+         dailyProfit += HistoryDealGetDouble(ticket, DEAL_PROFIT) + HistoryDealGetDouble(ticket, DEAL_SWAP) + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+         dailyLot += HistoryDealGetDouble(ticket, DEAL_VOLUME);
+      }
+   }
+   
+   // Susun Pesan
+   string tglKemarin = TimeToString(startOfYesterday, TIME_DATE);
+   string wibNow = TimeToString(nowWIB, TIME_DATE|TIME_MINUTES) + " WIB";
+   string status = (dailyProfit > 0) ? "Profit ✅" : "Loss ❌";
+   
+   string msg = "##### DAILY RECAP (TUTUP BUKU) #####\n"
+              + "Tanggal : " + tglKemarin + "\n"
+              + "Profit Harian : " + (dailyProfit>=0?"+$":"-$") + DoubleToString(MathAbs(dailyProfit), 2) + "\n"
+              + "Volume Harian : " + DoubleToString(dailyLot, 2) + " Lot\n"
+              + "Status : " + status + "\n"
+              + "---------------------------\n"
+              + "Saldo Akhir : $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
+              + "Laporan : " + wibNow;
+              
+   SendTelegram(msg);
+}
+
+//+------------------------------------------------------------------+
+//| DASHBOARD HARI INI (RESET 00:00 WIB)                             |
+//+------------------------------------------------------------------+
+void UpdateDashboard() {
+   // A. Data Live Floating
+   double liveBuyLot = 0, liveSellLot = 0;
+   double liveBuyPnL = 0, liveSellPnL = 0;
+   
+   for(int i=PositionsTotal()-1; i>=0; i--) {
+      if(positionInfo.SelectByIndex(i) && positionInfo.Magic() == MagicNumber && positionInfo.Symbol() == _Symbol) {
+         double pnl = positionInfo.Profit() + positionInfo.Swap() + positionInfo.Commission();
+         if(positionInfo.PositionType() == POSITION_TYPE_BUY) {
+            liveBuyLot += positionInfo.Volume();
+            liveBuyPnL += pnl;
+         } else {
+            liveSellLot += positionInfo.Volume();
+            liveSellPnL += pnl;
+         }
+      }
+   }
+   
+   // B. Hitung Profit HARI INI (Mulai 00:00 WIB)
+   datetime nowWIB = GetWIBTime();
+   MqlDateTime dt;
+   TimeToStruct(nowWIB, dt);
+   dt.hour=0; dt.min=0; dt.sec=0;
+   datetime startOfTodayWIB = StructToTime(dt); // Jam 00:00 WIB Hari Ini
+   
+   HistorySelect(0, TimeCurrent()); // Load all history
+   double profitToday = 0;
+   
+   for(int i=0; i<HistoryDealsTotal(); i++) {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol && HistoryDealGetInteger(ticket, DEAL_MAGIC) == MagicNumber) {
+         // Cek Waktu
+         datetime dealTimeServer = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+         // Konversi sederhana ke WIB (Asumsi Server Offset Konstan relative ke Local)
+         // Kita pakai selisih waktu saat ini
+         long offset = GetWIBTime() - TimeCurrent(); 
+         datetime dealTimeWIB = dealTimeServer + (datetime)offset;
+         
+         if(dealTimeWIB >= startOfTodayWIB) {
+             profitToday += HistoryDealGetDouble(ticket, DEAL_PROFIT) + HistoryDealGetDouble(ticket, DEAL_SWAP) + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+         }
+      }
+   }
+   
+   // C. Tampilan
+   int xBase = 240; 
+   color colHead = clrGold;
+   color colText = clrWhite;
+   color colBuy  = (liveBuyPnL >= 0) ? clrLime : clrRed; 
+   color colSell = (liveSellPnL >= 0) ? clrLime : clrRed;
+   color colProf = (profitToday >= 0) ? clrLime : clrRed;
+
+   CreateLabel("P100_Title", "EA PROJECT100", xBase+15, 105, colHead, 10, true);
+   
+   string sBuy = "Buy   : " + DoubleToString(liveBuyLot, 2) + " L  ($ " + DoubleToString(liveBuyPnL, 2)+")";
+   CreateLabel("P100_Buy", sBuy, xBase+15, 85, (liveBuyLot>0 ? colBuy : colText));
+   
+   string sSell = "Sell  : " + DoubleToString(liveSellLot, 2) + " L  ($ " + DoubleToString(liveSellPnL, 2)+")";
+   CreateLabel("P100_Sell", sSell, xBase+15, 65, (liveSellLot>0 ? colSell : colText));
+   
+   string sTot = "Total : " + DoubleToString(liveBuyLot+liveSellLot, 2) + " Lot";
+   CreateLabel("P100_Tot", sTot, xBase+15, 45, colText);
+   
+   CreateLabel("P100_Line", "--------------------------", xBase+15, 35, clrGray);
+   
+   // LABEL DIGANTI JADI 'TP Today'
+   string sProf = "TP Today: " + (profitToday>=0?"+$":"-$") + DoubleToString(MathAbs(profitToday), 2);
+   CreateLabel("P100_Prof", sProf, xBase+15, 20, colProf, 10, true);
+}
+
+// ... FUNGSI LAIN (DRAWDOWN, DLL) TETAP SAMA ...
+
+void CheckMaxDrawdown() {
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity < balance) {
+      double currentDDMoney = balance - equity;
+      double currentDDPerc  = (currentDDMoney / balance) * 100.0;
+      double recordDD = GlobalVariableGet(GV_DD_Money);
+      if(currentDDMoney > recordDD) {
+         GlobalVariableSet(GV_DD_Money, currentDDMoney);
+         GlobalVariableSet(GV_DD_Perc, currentDDPerc);
+         GlobalVariableSet(GV_DD_Time, (double)GetWIBTime());
+      }
+   }
+}
+
+void CreateLabel(string name, string text, int x, int y, color col, int fontSize=9, bool bold=false) {
+   if(ObjectFind(0, name) < 0) {
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_RIGHT_LOWER); 
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontSize);
+      ObjectSetString(0, name, OBJPROP_FONT, "Consolas"); 
+   }
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x); 
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+   if(bold) ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontSize+1);
+}
+
+void RemoveDuplicateOrders() {
+   for(int i=PositionsTotal()-1; i>=0; i--) {
+      if(positionInfo.SelectByIndex(i) && positionInfo.Magic() == MagicNumber) {
+         ulong ticketA = positionInfo.Ticket();
+         ENUM_POSITION_TYPE typeA = positionInfo.PositionType();
+         double priceA = positionInfo.PriceOpen();
+         int levelA = (int)(MathRound(priceA / JarakGrid) * JarakGrid);
+         for(int j=0; j<PositionsTotal(); j++) {
+            if(i == j) continue; 
+            if(positionInfo.SelectByIndex(j) && positionInfo.Magic() == MagicNumber) {
+               if(typeA == positionInfo.PositionType() && levelA == (int)(MathRound(positionInfo.PriceOpen()/JarakGrid)*JarakGrid) && ticketA > positionInfo.Ticket()) {
+                  trade.PositionClose(ticketA); return; 
+               }
+            }
+         }
+      }
+   }
+}
+
+datetime GetWIBTime() { return TimeGMT() + (7 * 3600); }
+
+bool IsTradingTime() {
+   if(!UseTimeFilter) return true; 
+   MqlDateTime dt; TimeToStruct(GetWIBTime(), dt);
+   int h = dt.hour;
+   if(JamMulai_WIB < JamStop_WIB) return (h >= JamMulai_WIB && h < JamStop_WIB);
+   else return (h >= JamMulai_WIB || h < JamStop_WIB);
+}
+
+void ManageGrid(int level) {
+   bool buyExist = IsOrderExistsById(level, POSITION_TYPE_BUY);
+   bool sellExist = IsOrderExistsById(level, POSITION_TYPE_SELL);
+   bool isTime = IsTradingTime(); 
+   if(!buyExist) {
+      double totalBuy = GetTotalLots(POSITION_TYPE_BUY);
+      if(isTime || totalBuy > 0) { if(OpenOrder(ORDER_TYPE_BUY, level, CalculateLot(level, true))) lastExecutionTime = TimeCurrent(); }
+   }
+   if(!sellExist) {
+      if(TimeCurrent() >= lastExecutionTime + JedaAntiSpam) {
+         double totalSell = GetTotalLots(POSITION_TYPE_SELL);
+         if(isTime || totalSell > 0) { if(OpenOrder(ORDER_TYPE_SELL, level, CalculateLot(level, false))) lastExecutionTime = TimeCurrent(); }
+      }
+   }
+}
+
+void SendPeriodicReport() {
+   double buyLot = GetTotalLots(POSITION_TYPE_BUY);
+   double sellLot = GetTotalLots(POSITION_TYPE_SELL);
+   double totalLot = buyLot + sellLot;
+   double maxDDMoney = GlobalVariableGet(GV_DD_Money);
+   double maxDDPerc  = GlobalVariableGet(GV_DD_Perc);
+   datetime maxDDTime = (datetime)GlobalVariableGet(GV_DD_Time);
+   string ddTimeString = (maxDDTime > 0) ? TimeToString(maxDDTime, TIME_DATE|TIME_MINUTES) + " WIB" : "-";
+   string statusJam = IsTradingTime() ? "ON (Trading)" : "OFF (Waiting)";
+   string wib = TimeToString(GetWIBTime(), TIME_DATE|TIME_MINUTES) + " WIB";
+   
+   string msg = "##### LAPORAN RUTIN #####\n"
+              + "Mode: " + statusJam + "\n"
+              + "Lot Buy: " + DoubleToString(buyLot, 2) + "\n"
+              + "Lot Sell: " + DoubleToString(sellLot, 2) + "\n"
+              + "Total Lot: " + DoubleToString(totalLot, 2) + "\n"
+              + "Balance: $" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n"
+              + "Equity: $" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + "\n"
+              + "-----------------------\n"
+              + "⚠️ Max DD Record:\n"
+              + "$ -" + DoubleToString(maxDDMoney, 2) + " ("+DoubleToString(maxDDPerc, 1)+"%)\n"
+              + "Terjadi: " + ddTimeString + "\n"
+              + "-----------------------\n"
+              + "Waktu: " + wib;
+   SendTelegram(msg);
+}
+
+void CheckTakeProfit(int currentLevel) {
+   string wib = TimeToString(GetWIBTime(), TIME_DATE|TIME_MINUTES) + " WIB";
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   
+   double bProfit = CalculateProfit(POSITION_TYPE_BUY);
+   if(bProfit >= TargetProfit) { 
+      ClosePositions(POSITION_TYPE_BUY); 
+      buyLotRefPrice = (double)currentLevel; 
+      string msg = "##### TP BUY HIT #####\nProfit: +$" + DoubleToString(bProfit, 2) + "\nBalance: $" + DoubleToString(balance, 2) + "\nWaktu: " + wib;
+      SendTelegram(msg); lastExecutionTime=TimeCurrent(); 
+   }
+   
+   double sProfit = CalculateProfit(POSITION_TYPE_SELL);
+   if(sProfit >= TargetProfit) { 
+      ClosePositions(POSITION_TYPE_SELL); 
+      sellLotRefPrice = (double)currentLevel; 
+      string msg = "##### TP SELL HIT #####\nProfit: +$" + DoubleToString(sProfit, 2) + "\nBalance: $" + DoubleToString(balance, 2) + "\nWaktu: " + wib;
+      SendTelegram(msg); lastExecutionTime=TimeCurrent(); 
+   }
+}
+
+bool OpenOrder(ENUM_ORDER_TYPE type, int level, double lot) {
+   double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   return trade.PositionOpen(_Symbol, type, lot, price, 0, 0, "L:"+(string)level);
+}
+double GetTotalLots(ENUM_POSITION_TYPE type) {
+   double t=0; for(int i=PositionsTotal()-1; i>=0; i--) { if(positionInfo.SelectByIndex(i) && positionInfo.Magic()==MagicNumber && positionInfo.PositionType()==type) t+=positionInfo.Volume(); } return t;
+}
+bool IsOrderExistsById(int level, ENUM_POSITION_TYPE type) {
+   string c="L:"+(string)level; for(int i=PositionsTotal()-1; i>=0; i--) { if(positionInfo.SelectByIndex(i) && positionInfo.Magic()==MagicNumber && positionInfo.PositionType()==type) { if(StringFind(positionInfo.Comment(), c)>=0 || MathAbs(positionInfo.PriceOpen()-(double)level)<(JarakGrid/2.0)) return true; } } return false;
+}
+double CalculateLot(int level, bool isBuy) {
+   double refP = isBuy ? buyLotRefPrice : sellLotRefPrice;
+   double lot = LotAwal * MathPow(2, (int)((int)(MathAbs((double)level-refP)/JarakGrid)/LevelsPerStep));
+   return MathMax(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), MathFloor(lot/SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP))*SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP));
+}
+double CalculateProfit(ENUM_POSITION_TYPE type) {
+   double p=0; for(int i=PositionsTotal()-1; i>=0; i--) { if(positionInfo.SelectByIndex(i) && positionInfo.Magic()==MagicNumber && positionInfo.PositionType()==type) p+=positionInfo.Profit()+positionInfo.Commission()+positionInfo.Swap(); } return p;
+}
+void ClosePositions(ENUM_POSITION_TYPE type) {
+   for(int i=PositionsTotal()-1; i>=0; i--) { if(positionInfo.SelectByIndex(i) && positionInfo.Magic()==MagicNumber && positionInfo.PositionType()==type) trade.PositionClose(positionInfo.Ticket()); }
+}
+void CloseAllOrders() { ClosePositions(POSITION_TYPE_BUY); ClosePositions(POSITION_TYPE_SELL); }
+void SendTelegram(string m) {
+   char d[]; StringToCharArray("chat_id="+TelegramChatID+"&text="+m, d); uchar r[]; string h="Content-Type: application/x-www-form-urlencoded", res;
+   WebRequest("POST", "https://api.telegram.org/bot"+TelegramToken+"/sendMessage", h, 3000, d, r, res);
+}
